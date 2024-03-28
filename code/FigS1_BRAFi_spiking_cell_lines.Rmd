@@ -1,0 +1,87 @@
+---
+title: "Manual counting spiky traces"
+output: html_notebook
+date: 2024-02-19
+author: "Darren Tyson & Philip Stauffer"
+---
+
+## Identifying individual cells (segmented objects) exhibiting spike patterns in calbryte traces
+Copying code from "Calbryte trace analysis 20240125 97607PS15.Rmd"
+
+### 2024-01-05 ATPstim.wave data 
+
+```{r}
+source("traceAnalysisFxns.r")
+library(forcats)
+```
+
+### Analysis of manual quantification
+Performed by Philip.  
+
+First-pass analysis will only consider spikes vs no spikes.  
+
+### 
+```{r}
+a <- read.csv("../data/20231221_othercells.pulsing_manual_spike_dtxn.csv")
+#too few cells for n=50 below
+a <- a[,-(3:5)]
+a$well <- sapply(strsplit(a$reg_id,"_"), "[[", 1)
+
+platemap <- read.csv("../data/platemap_20231221_SC.othercelllines.tsv", sep="\t")
+platemap$drug1[platemap$drug1== "dabrafenib"] <- "dab+tram"
+platemap <- platemap[platemap$well %in% a$well,]
+
+a$cell_line <- platemap[match(a$well, platemap$well), "cell.line"]
+a$drug <- platemap[match(a$well, platemap$well),"drug1"]
+```
+
+```{r}
+b <- read.csv("../data/20240112.a375.BRAFiMEKi.csv")
+b$well <- sapply(strsplit(b$reg_id,"_"), "[[", 1)
+b$cell_line <- "A375"
+b$drug <- "dab+tram"
+
+a <- rbind(a,b)
+rm(b)
+
+a$cond <- paste(a$cell_line, a$drug, sep="_")
+conditions <- unique(a$cond)
+```
+
+
+```{r}
+all_no_spike_ids <- a$reg_id[a$spikes==0]
+```
+
+```{r}
+set.seed(13)
+prop_spiking <- do.call(c, lapply(conditions, function(co) {
+    samp <- lapply(1:100, function(i) sample(a$reg_id[a$cond==co], size=200, replace=TRUE))
+    sapply(samp, function(x) length(which(!x %in% all_no_spike_ids))/200)
+}))
+
+prop_spiking_df <- data.frame(condition=rep(conditions, each=100),
+                              prop_spiking=prop_spiking)
+
+prop_spiking_df$cell_line <- sapply(strsplit(prop_spiking_df$condition, "_"), "[[", 1)
+prop_spiking_df$drug <- sapply(strsplit(prop_spiking_df$condition, "_"), "[[", 2)
+```
+
+
+
+```{r fig.height=2, fig.width=5}
+p <- ggplot(data=prop_spiking_df, aes(x=cell_line, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + 
+    geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    coord_flip() +
+    theme(legend.position="none",
+          axis.text.x = element_text(size=9),
+          axis.title.x = element_text(size=10, face="bold")
+          ) +
+    ylab("Proportion spiking") + 
+    xlab("") +
+    facet_wrap(.~ drug)
+p
+```
+
+

@@ -1,0 +1,11 @@
+# hidden and temporary files
+.DS_Store
+~*
+.ipynb*
+tmp.*
+*tmp.R
+
+# History files
+.Rhistory
+.Rapp.history
+

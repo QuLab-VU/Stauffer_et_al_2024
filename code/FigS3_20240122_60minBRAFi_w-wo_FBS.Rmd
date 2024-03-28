@@ -1,0 +1,69 @@
+---
+title: "Manual counting spiky traces"
+output: html_notebook
+date: 2024-02-21
+author: "Darren Tyson & Philip Stauffer"
+---
+
+# Testing effects of FBS
+Drug-sensitive cells (60 min of BRAFi)
+
+## Identifying individual cells (segmented objects) exhibiting spike patterns in calbryte traces
+Copying code from "20240111_manual_spike_analysis.Rmd"
+
+### 2024-01-22 data 97606PS14
+```{r}
+source("traceAnalysisFxns.r")
+```
+
+
+### Analysis of manual quantification
+Performed by Philip
+```{r}
+a <- read.csv("../data/20240122_manual_spike_detection.csv") 
+
+
+a$spikes[is.na(a$spikes)] <- 0 
+rois <- a$reg_id
+wells <- unique(sapply(strsplit(a$reg_id, "_"), "[[", 1))
+
+platemap <- read.csv("../data/platemap_20240122_IXpulsing_60mBRAFi.tsv", sep="\t")
+platemap <- platemap[platemap$well %in% wells,]
+
+conditions <- ifelse(grepl("free",platemap$drug1), "no FBS", "FBS")
+
+all_no_spike_ids <- a$reg_id[a$spikes==0]
+platemap[platemap$well %in% wells,]
+```
+
+```{r}
+set.seed(13)
+prop_spiking <- do.call(c, lapply(unique(conditions), function(co) {
+    n <- 75
+    wells_for_sampling <- wells[conditions==co]
+    rois_for_sampling <- rois[sapply(strsplit(rois,"_"), "[[",1) %in% wells_for_sampling]
+    samp <- lapply(1:100, function(i) sample(rois_for_sampling, n))
+    sapply(samp, function(x) length(which(!x %in% all_no_spike_ids))/n)
+}))
+prop_spiking_df <- data.frame(condition=factor(rep(unique(conditions), each=100), levels=c("no FBS","FBS")), 
+                              prop_spiking=prop_spiking)
+
+```
+
+```{r fig.height=3, fig.width=3}
+p <- ggplot(data=prop_spiking_df[prop_spiking_df$condition== "no FBS",], aes(x=condition, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + 
+    geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    # coord_flip() + 
+    theme(legend.position="none", 
+          axis.text.x = element_blank(),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size=16, face="bold"),
+          axis.title.y = element_text(size=16, face="bold")) + 
+    # ylim(c(0,0.75)) +
+    ylab("Proportion spiking") + 
+    xlab("BRAFi, 60 min") +
+    ylim(0,0.27)
+p
+```
+

@@ -1,0 +1,150 @@
+---
+title: "single cell calcium pulsing data"
+author: "Philip Stauffer"
+date: "3/3/2022"
+output: html_notebook
+---
+
+```{r Setup}
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+```
+
+```{r}
+SAVEDIR <- file.path("~/Desktop/Categorized_data")
+if(!dir.exists(SAVEDIR)) dir.create(SAVEDIR)
+```
+
+
+```{r warning=FALSE}
+#load file and trim data
+file_path <- "https://www.dropbox.com/scl/fi/1jp75pjjed3rpg33x9nsi/A375_2_week_PLX.xlsx?rlkey=950ktnr26t3tzchd6cp6fw2i3&dl=1"
+tmp.file <- tempfile(fileext = ".txt")
+download.file(file_path, destfile = tmp.file)
+file_path <- tmp.file
+
+CaData <- read_excel(file_path, sheet = 1, col_names= TRUE)
+Trim_CaData <- select(CaData, c(2,6,16))
+
+#rename columns to be amendable to use in functions
+col_headings <- c("Time", "ROI", "Fura_Ratio")
+names(Trim_CaData) <- col_headings
+
+#Pull out time component and convert to numerical values that can be plotted
+Cleaned_CaData <- Trim_CaData%>%
+  separate(Time, c("Date", "Time"), sep = " ", convert = TRUE) %>%
+  select(c(2:4))
+
+seconds_data <- Cleaned_CaData %>%
+  separate(Time, c("Hour", "Minute", "Second"), sep = ":", convert = TRUE) %>%
+  mutate(HourSec = Hour*60^2, MinuteSec = Minute*60, totalSec = HourSec + MinuteSec + Second, totalMin = totalSec/60) %>%
+  select(c(4,5,8,9))
+```
+
+
+```{r eval=FALSE, include=FALSE}
+as_tibble(pcells)
+num <- c(1:443)
+x <- data.frame(pcells, num)
+as.numeric(x$pcells)
+
+#plot pulsing cells in facet wrap
+#start by coercing cells in x to characters
+pulsing <- seconds_data %>%
+  filter(ROI %in% x$pcells) %>%
+  mutate(ROI = as.character(ROI))
+```
+
+
+
+
+```{r message=FALSE, warning=FALSE}
+#plot different groups of cells
+#Regular oscillations:
+RO <- (c(169, 158, 187, 11, 327, 321, 346, 347, 360, 365, 415, 496))
+RO2 <- c(169, 158, 187, 11, 415, 496, 327, 321, 347)
+ROd <- seconds_data %>%
+  filter(ROI %in% RO2) %>%
+  mutate(ROI = as.character(ROI))
+ROd %>%
+  ggplot() +
+  geom_line(aes(x = totalMin, y = Fura_Ratio, color = ROI)) +
+  facet_wrap(.~ROI) +
+  labs(x = "Time (Minutes)", y = "Fura-2-AM 340nm/380 nm Ratio", title = "Regular Oscillations (13.15% of all cells -- 26.19% of pulsing cells)") +
+  theme(legend.position="none") +
+  coord_cartesian(ylim = c(0.45, 1.3)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8))
+ggsave(file.path(SAVEDIR,"percent_regular_oscillations.png"))
+
+```
+
+```{r message=FALSE, warning=FALSE}
+#Imperfect regular oscillations
+IRO <- c(56, 67, 76, 79, 30, 115, 245, 654, 666, 675)
+IRO2 <- c(30, 56, 115)
+IROd <- seconds_data %>%
+  filter(ROI %in% IRO2) %>%
+  mutate(ROI = as.character(ROI))
+IROd %>%
+  ggplot() +
+  geom_line(aes(x = totalSec, y = Fura_Ratio, color = ROI)) +
+  facet_wrap(.~ROI) +
+  labs(x = "Time (Seconds)", y = "Fura-2-AM 340nm/380 nm Ratio", title = "Imperfect Regular Oscillations") +
+  theme(legend.position="none") +
+  coord_cartesian(ylim = c(0.45, 1.3))
+ggsave(file.path(SAVEDIR,"imperfect_regular_oscillations.png"))
+
+
+#High frequency pulsing (like membrane potential channel activity)
+HF <- c(100, 20, 28, 33, 157, 335, 378, 474)
+HF2 <- c(20, 335, 378, 474,484,728, 100, 957, 897)
+HFd <- seconds_data %>%
+  filter(ROI %in% HF2) %>%
+  mutate(ROI = as.character(ROI))
+HFd %>%
+  ggplot() +
+  geom_line(aes(x = totalMin, y = Fura_Ratio, color = ROI)) +
+  facet_wrap(.~ROI) +
+  labs(x = "Time (Minutes)", y = "Fura-2-AM 340nm/380 nm Ratio", title = "High Frequency Oscillations (11.45% of all cells -- 22.80% of pulsing cells)") +
+  theme(legend.position="none") +
+  coord_cartesian(ylim = c(0.45, 1.3)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8))
+ggsave(file.path(SAVEDIR,"high_frequency_oscillations.png"))
+
+
+#Increase and plateau
+IP <- c(102, 385, 445, 545, 592, 595, 663, 691, 885, 969)
+IP2 <- c(385, 969, 545, 595, 31, 398, 102, 455, 592)
+IPd <- seconds_data %>%
+  filter(ROI %in% IP2) %>%
+  mutate(ROI = as.character(ROI))
+IPd %>%
+  ggplot() +
+  geom_line(aes(x = totalMin, y = Fura_Ratio, color = ROI)) +
+  facet_wrap(.~ROI) +
+  labs(x = "Time (Minutes)", y = "Fura-2-AM 340nm/380 nm Ratio", title = "Increase and Plateau (2.38% of all cells -- 4.74% of pulsing cells)") +
+  theme(legend.position="none") +
+  coord_cartesian(ylim = c(0.45, 1.3))+
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8))
+ggsave(file.path(SAVEDIR,"increase_plateau.png"))
+
+
+#erractic
+E <- c(442, 435, 570)
+E2 <- c(905, 852, 570, 33, 442, 633, 912, 851, 737)
+Ed <- seconds_data %>%
+  filter(ROI %in% E2) %>%
+  mutate(ROI = as.character(ROI))
+Ed %>%
+  ggplot() +
+  geom_line(aes(x = totalMin, y = Fura_Ratio, color = ROI)) +
+  facet_wrap(.~ROI) +
+  labs(x = "Time (Minutes)", y = "Fura-2-AM 340nm/380 nm Ratio", title = "Erratic Oscillations (4.2% of all cells -- 8.35% of pulsing cells)") +
+  theme(legend.position="none") +
+  coord_cartesian(ylim = c(0.45, 1.3)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8))
+ggsave(file.path(SAVEDIR,"erratic_oscillations.png"))
+```
+
+
