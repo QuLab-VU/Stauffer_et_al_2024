@@ -1,0 +1,156 @@
+---
+title: 'SOCE: acute vs constant BRAFi'
+author: "Philip Stauffer & Darren Tyson"
+date: 2024-02-02
+output: html_notebook
+---
+## NOTE
+All preprocessing steps performed previously and stored in a common Rdata file:  
+`CalciumImaging/data/20210828_A375_Fura2.Rdata`
+
+Reorganized code and made concise.  
+```{r}
+library(tidyverse)
+```
+
+```{r Load data}
+load("../data/20210828_A375_Fura2.Rdata")
+```
+
+```{r Define functions}
+soce_plot <- function(dat, tit="SOCE Assay") {
+    dat %>% 
+    ggplot() +
+    geom_line(aes(x = Time_sec, y = Fura_Ratio, group = ROI), alpha = 1/5) +
+    labs(x= "Time (seconds)", y = expression(F[340]/F[380]), title = tit) +
+    coord_cartesian(ylim = c(0.5, 2), xlim=c(0,1700)) +
+    theme(legend.position="none")
+}
+
+nTimepoints <- function(dat) nrow(subset(dat, ROI==unique(ROI)[1]))
+
+includeTimeRange <- function(dat, time_wind=c(1000,1600)) 
+    dat[dat$Time_sec > time_wind[1] & dat$Time_sec < time_wind[2],]
+
+getIntegral <- function(dat, time_wind=c(1000,1600)) {
+    n <- nTimepoints(includeTimeRange(dat, time_wind))
+    includeTimeRange(dat, time_wind) %>% group_by(ROI) %>% 
+    summarise(integral= sum(Fura_Ratio)/n - min(Fura_Ratio))
+}
+```
+
+### Figure S5 (top)
+```{r Naive cells, fig.height=3, fig.width=4}
+soce_plot(ad[["naive"]], tit="drug naive")
+```
+
+### 30 min BRAFi -- Constant and Holiday
+```{r 30min BRAFi, fig.height=3, fig.width=4}
+soce_plot(ad[["con30m"]], tit="30 min BRAFi")
+soce_plot(ad[["hol30m"]], tit="30 min BRAFi + 15 min holiday")
+```
+
+### 24 hours BRAFi -- Constant and Holiday
+```{r 24h BRAFi, fig.height=3, fig.width=4}
+soce_plot(ad[["con24h"]], tit="24 h BRAFi")
+soce_plot(ad[["hol24h"]], tit="24 h BRAFi + 15 min holiday")
+```
+
+### 3 Days BRAFi -- Constant and holiday
+
+```{r 3d BRAFi w holiday, fig.height=3, fig.width=4}
+soce_plot(ad[["con3d"]], tit="3 days BRAFi")
+soce_plot(ad[["hol3d"]], tit="3 days BRAFi + 15 min holiday")
+```
+### Figure S5 (bottom)
+```{r 3d BRAFi, fig.height=3, fig.width=4}
+soce_plot(ad[["con3d"]], tit="3 days BRAFi")
+```
+
+### 8 Days BRAFi -- Constant and holiday
+```{r 8d BRAFi, fig.height=3, fig.width=4}
+soce_plot(ad[["con8d"]], tit="8 days BRAFi")
+soce_plot(ad[["hol8d"]], tit="8 days BRAFi + 15 min holiday")
+```
+
+### 8 days BRAFi + 15 min cobimetinib
+8 Days PLX followed by 1 µM cobimetinib + BRAFi about 15 minutes before ER Ca2+ release
+```{r 8d BRAFi plus cobimetinib, fig.height=3, fig.width=4}
+soce_plot(ad[["cobi8d"]], tit="8 days BRAFi + 15 min 1 µM cobimetinib")
+```
+
+```{r, fig.height=3, fig.width=4}
+soce_plot(ad[["naive"]], tit="drug naive")
+soce_plot(ad[["con30m"]], tit="30 min BRAFi")
+soce_plot(ad[["con24h"]], tit="24 h BRAFi")
+soce_plot(ad[["con3d"]], tit="3 days BRAFi")
+soce_plot(ad[["con8d"]], tit="8 days BRAFi")
+```
+
+## Calculate Integrals of SOCE and make comparisons between groups with violon or box plots
+Using default time window of 1000 > Time_sec > 1600.
+```{r}
+## Naive
+naivesocint <- getIntegral(ad[["naive"]]) %>% mutate(cond="Untreated")
+## 30 minutes
+con30msocint <- getIntegral(ad[["con30m"]]) %>% mutate(cond="30 min")
+## 24 hours
+con24hsocint <- getIntegral(ad[["con24h"]]) %>% mutate(cond= "24 hours")
+## 3 days
+con3dsocint <- getIntegral(ad[["con3d"]]) %>% mutate(cond= "3 days")
+## 8 days
+con8dsocint <- getIntegral(ad[["con8d"]]) %>% mutate(cond= "8 days")
+## 8 days + cobimetinib
+con8dcobsocint <- getIntegral(ad[["cobi8d"]]) %>% mutate(cond= "8 days + cobimetinib")
+```
+
+## Combine the datasets and plot Fura_Ratio by each ROI
+```{r}
+# intd <- rbind(naivesocint, con30msocint, con24hsocint, con3dsocint, con8dsocint)
+# intd <- intd %>% mutate(t = fct_relevel(cond, c("Untreated", "30 min", "24 hours", "3 days", "8 days")))
+intd <- rbind(naivesocint, con3dsocint)
+intd$cond <- factor(ifelse(intd$cond=="Untreated", "no BRAFi", "BRAFi, 3d"), levels=c("no BRAFi", "BRAFi, 3d"))
+# intd <- intd %>% mutate(cond = fct_relevel(cond, c("Untreated", "3 days")))
+```
+
+
+```{r fig.height=4, fig.width=2.75}
+intd %>% 
+ggplot(aes(x=cond, y=integral)) + geom_violin(width=.75, fill="#CFAE70") + geom_boxplot(width=0.1, color="grey", alpha=0.5) +
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=16),
+          axis.title.x = element_text(size=18, face="bold"),
+          axis.title.y = element_text(size=18, face="bold")) + 
+    ylim(c(0,.75)) +
+    ylab("SOCE activity") + 
+    xlab("")
+```
+
+
+```{r}
+n_cells <- lapply(ad, function(x) length(unique(x$ROI)))
+```
+
+
+```{r}
+int_er <- rbind(getIntegral(ad[["naive"]], time_wind=c(500,1000)) %>% 
+    mutate(cond="no BRAFi"), 
+                getIntegral(ad[["con3d"]], time_wind=c(500,1000)) %>% 
+    mutate(cond= "BRAFi, 3d"))
+int_er <- int_er %>% mutate(cond = fct_relevel(cond, c("no BRAFi", "BRAFi, 3d")))
+```
+
+```{r fig.height=4, fig.width=2.75}
+int_er %>% 
+ggplot(aes(x=cond, y=integral)) + geom_violin(width=.75, fill="#1C1C1C") + geom_boxplot(width=0.1, color="grey", alpha=0.5) +
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=16),
+          axis.title.x = element_text(size=18, face="bold"),
+          axis.title.y = element_text(size=18, face="bold")) + 
+    ylim(c(0,0.5)) +
+    ylab("ER calcium content") + 
+    xlab("")
+```
+

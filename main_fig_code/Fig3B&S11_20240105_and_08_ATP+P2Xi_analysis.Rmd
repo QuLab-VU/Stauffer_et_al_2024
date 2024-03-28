@@ -1,0 +1,139 @@
+---
+title: "R Notebook"
+output: html_notebook
+date: 2024-03-02
+author: "Darren Tyson & Philip Stauffer"
+---
+
+### Analysis of P2Xi (isoPPADS) effects on ATP-induced calcium spikes
+in BRAF-mutant melanoma cells treated with BRAFi (8 µM PLX4720) for 3 days.  
+
+Combining data from 2024-01-05 and 2024-01-08
+
+```{r}
+source("traceAnalysisFxns.r")
+```
+
+```{r Load preprocessed data}
+intvals <- read.csv("../data/20240108_ATPstim_wave_preprocessed_data.csv")
+
+wells <- unique(sapply(strsplit(intvals$reg_id, "_"), "[[", 1))
+
+
+temp <- read.csv("../data/20240105_ATPstim_wave_preprocessed_data.csv")
+temp <- temp[grepl("H07", temp$reg_id) | grepl("F07", temp$reg_id),]
+
+intvals <- rbind(intvals, temp)
+rm(temp)
+
+wells <- unique(sapply(strsplit(intvals$reg_id, "_"), "[[", 1))
+
+int_well_mean_norm <- lapply(wells, function(w) {
+    dff <- intvals[grepl(w,intvals$reg_id),]
+    getMeanInt(dff$intensity_mean, unique(dff$reg_id), unique(dff$im_idx))
+})
+
+intvals$int_well_mean_norm <- do.call(c, int_well_mean_norm)
+
+rois <- unique(intvals$reg_id)
+```
+
+### Annotation
+```{r}
+platemap <- read.csv("../data/platemap_20240108_ATPstim.P2Xi_Ca2+imaging.tsv", sep="\t")
+platemap <- platemap[platemap$well %in% setdiff(wells, c("F07","H07")),]
+
+platemap2 <- read.csv("../data/platemap_20240105_ATPstim.wave_Ca2+imaging.tsv", sep="\t")
+platemap2 <- platemap2[platemap2$well %in% c("H07","F07"),]
+platemap2$drug2 <- platemap2$drug1
+platemap2$drug2.conc <- signif(platemap2$drug1.conc, 2)
+platemap2$drug2.units <- "M"
+platemap2$drug1 <- "isoPPADS"
+platemap2$drug1.conc <- 0
+
+platemap <- rbind(platemap,platemap2)
+rownames(platemap) <- NULL
+rm(platemap2)
+
+platemap
+```
+
+### Number of objects per well
+```{r}
+sapply(wells, function(w) length(unique(intvals[grepl(w,intvals$reg_id),"reg_id"])))
+```
+
+```{r}
+conditions <- apply(platemap[,c("drug1","drug1.conc","drug2","drug2.conc")], 1, function(x) paste(x,collapse="_"))
+conditions <- factor(conditions, levels = c(  "isoPPADS_0.0000e+00_ATP_0.0e+00",
+                                              "isoPPADS_0.0000e+00_ATP_3.9e-05",
+                                              "isoPPADS_2.4375e-08_ATP_3.9e-05",
+                                              "isoPPADS_9.7500e-08_ATP_3.9e-05",
+                                              "isoPPADS_3.9000e-07_ATP_3.9e-05",
+                                              "isoPPADS_1.5600e-06_ATP_3.9e-05"))
+
+conditions2 <- c("0",
+                 "24 nM",
+                 "98 nM",
+                 "390 nM",
+                 "1.5 µM",
+                 "0",
+                 "no ATP, 0")
+conditions2 <- factor(conditions2, levels=conditions2[c(7,1:5)])
+
+
+a <- rbind(read.csv("../data/20240105_ATPstim_wave_manual_spike_dtxn.csv"), 
+           read.csv("../data/20240108_ATPstim_wave_manual_spike_dtxn.csv"))
+
+rois <- a$reg_id
+a$well <- sapply(strsplit(a$reg_id,"_"), "[[", 1)
+a$cond <- conditions2[match(a$well,wells)]
+
+all_no_spike_ids <- a$reg_id[a$spikes==0]
+```
+
+```{r}
+set.seed(13)
+prop_spiking <- do.call(c, lapply(wells, function(w) {
+    n <- 50
+    samp <- lapply(1:100, function(i) sample(rois[grepl(w,rois)], n, replace = TRUE))
+    sapply(samp, function(x) length(which(!x %in% all_no_spike_ids))/n)
+}))
+
+prop_spiking_df <- data.frame(well=rep(wells, each=100), 
+                              condition=rep(conditions2, each=100),
+                              prop_spiking=prop_spiking)
+
+```
+
+```{r fig.height=2.5, fig.width=4}
+p <- ggplot(data=prop_spiking_df, aes(x=condition, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + 
+    geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    coord_flip() +
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size=16, face="bold"),
+          axis.title.y = element_text(size=16, face="bold")) + 
+    ylim(c(0,0.5)) +
+    ylab("Proportion spiking") + 
+    xlab("")
+p
+
+# ggsave("~/Desktop/P2Xi_spiking.pdf", width=4, height=2.5, units="in")
+```
+
+
+```{r}
+m <- lm(prop_spiking ~ condition, data=prop_spiking_df)
+m_anova <- aov(m)
+TukeyHSD(m_anova)$condition[grepl("0", rownames(TukeyHSD(m_anova)$condition)),]
+```
+
+
+### Supplementary Figure S10
+```{r fig.height=4.5, fig.width=2.5}
+plotTraceMean(c("D04_10", "D04_107", "D04_114", "D04_146", "D04_165", "D04_14", "D04_138"), intvals, autorange_y=T, yl= c(1000, 4000))
+```
+

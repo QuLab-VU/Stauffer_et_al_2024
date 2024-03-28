@@ -1,0 +1,614 @@
+---
+title: "Caclium pulsing analysis"
+output: html_notebook
+date: 2023-04-23
+author: Darren Tyson & Philip Stauffer
+---
+## First-pass attempt at characterizing calcium spikes
+
+```{r Load packages and functions}
+# install.packages("Rcatch22")
+# install.packages("dichromat")
+# install.packages("DescTools")
+
+library(Rcatch22)
+library(smooth)
+library(tidyverse)
+source("traceAnalysisFxns.r")
+
+numRuns <- function(x, threshold=0.2,len=2) 
+{
+    x[x>=threshold]
+    out <- rle(x)$lengths
+    length(out[out>=len])
+}
+
+numSpikes <- function(x, threshold=0.17)
+{
+    length(which(x>=threshold))
+}
+avgSpikeLength <- function(x, threshold=0.17) 
+{
+    pts_above_th <- x[x>=threshold]
+    out <- tryCatch({rle(pts_above_th)$lengths},error=function(cond){NA})
+    tryCatch({mean(out)},error=function(cond){message(cond);NA})
+}
+
+avgTimeBetweenSpikes <- function(x, threshold=0.17)
+{
+    pts_above_th <- x[x>=threshold]
+    out <- tryCatch({inverse.rle(pts_above_th)$lengths},error=function(cond){NA})
+    tryCatch({mean(out)},error=function(cond){NA})
+}
+
+
+std_colnames <- c("reg_id","im_idx","time_sec","fura_ratio","expt_date")
+
+fixColnames <- function(x) sapply(x, function(z) 
+    switch(z,
+           ND.T="im_idx",
+           "ROI ID" = "reg_id",
+           totalSec = "time_sec",
+           Fura_Ratio = "fura_ratio",
+           ratio_340_380 = "fura_ratio",
+           "Ratio 340/380" = "fura_ratio",
+           ROI = "reg_id",
+           z))
+
+convertTime <- function(dat) {
+    cn <- colnames(dat)
+    if("Time_ms" %in% cn & ! "time_sec" %in% cn) {
+        dat <- dat %>% separate(Time_ms, c("Minute", "Second"), sep = ":", convert = TRUE) %>% 
+            mutate(time_sec = Minute*60 + Second)  %>% select(all_of(setdiff(c(cn,"time_sec"),c("Time_ms","Minute","Second"))))
+    } else {
+        dat
+    }
+}
+
+processRawXLSX <- function(fpath, filter_min_area=100) {
+    stopifnot(any(grepl("\\.xlsx", fpath)))
+    
+    expt_date <- substr(sapply(strsplit(fpath, "/"), "[[", 7),1,8)
+    cond <- NA
+
+    if(any(grepl("csv", fpath))) cond_temp <- sapply(strsplit(sapply(strsplit(fpath, "/"), "[[", 7), "\\.csv\\?"), "[[", 1)
+    if(any(grepl("xlsx", fpath))) cond_temp <- sapply(strsplit(sapply(strsplit(fpath, "/"), "[[", 7), "\\.xlsx\\?"), "[[", 1)
+
+    cond_pt1 <- sapply(strsplit(cond_temp, "_"), "[[", 2)
+    cond_pt2 <- sapply(strsplit(cond_temp, "_"), "[[", 3)
+    cond_pt3 <- ifelse(length(strsplit(cond_temp, "_")) >= 4, sapply(strsplit(cond_temp, "_"), "[[", 4), "")
+    cond_temp <- paste(cond_pt1, cond_pt2, cond_pt3, sep="_")
+
+    if(any(grepl("naive", cond_temp))) {
+        naive_temp <- c(cond_pt1,cond_pt2,cond_pt3)[grep("naive",c(cond_pt1,cond_pt2,cond_pt3))]
+        cond <- paste(expt_date, naive_temp, sep="_")
+    }
+    if(any(grepl("untreated", cond_temp))) 
+        cond <- paste(expt_date, "naive", sep="_")
+    if(any(grepl("PLX",cond_temp))) 
+        cond <- paste(expt_date, sapply(strsplit(cond_temp, "_"), "[[", 3), sep="_")
+    if(any(grepl("free",cond_temp))) 
+        cond <- paste(expt_date, "3day8uMPLXCa2free", sep="_")
+    if(any(grepl("Ca2containing",cond_temp))) 
+        cond <- paste(expt_date, "3day8uMPLX_w_Ca2", sep="_")
+    if(any(grepl("MEK",cond_temp))) 
+        cond <- paste(expt_date, "30minMEKi", sep="_")
+
+    if(any(grepl("dropbox",fpath))) {
+        temp <- tempfile()
+        download.file(fpath, temp, mode="wb")
+    } else {
+        temp <- fpath
+    }
+    dat <- readxl::read_xlsx(temp)
+    keep_ocols <- c("Time [m:s]","ND.T","ROI ID","Intensity(340)","StDev(340)","Intensity(380)","StDev(380)","ROI Area [µm²]","Ratio 340/380")
+    dat <- dat[,keep_ocols]
+    times <- unique(dat$`Time [m:s]`)
+    diff_times <- difftime(times, times[1], units="secs", tz="UTC")
+    dat$time_sec <- DescTools::RoundTo(diff_times[match(dat$`Time [m:s]`,times)], multiple=5)
+    # remove objects < 100 µM^2
+    dat <- dat[dat$`ROI Area [µm²]` > filter_min_area,]
+    
+    # fix colnames
+    colnames(dat) <- fixColnames(colnames(dat))
+    dat$expt_date <- expt_date
+    dat$cond <- cond
+    return(as.data.frame(dat[,c(std_colnames,"cond")]))
+}
+
+preprocessData <- function(fpath) {
+    expt_date <- substr(sapply(strsplit(fpath, "/"), "[[", 7),1,8)
+
+    cond_temp <- sapply(strsplit(sapply(strsplit(fpath, "/"), "[[", 7), "\\.csv\\?"), "[[", 1)
+    cond_pt1 <- sapply(strsplit(cond_temp, "_"), "[[", 2)
+    cond_pt2 <- sapply(strsplit(cond_temp, "_"), "[[", 3)
+    cond_pt3 <- sapply(strsplit(cond_temp, "_"), "[[", 4)
+    cond_temp <- paste(cond_pt1, cond_pt2, cond_pt3, sep="_")
+
+    if(any(grepl("naive", cond_temp))) 
+        cond <- paste(expt_date, "naive", sep="_")
+    if(any(grepl("untreated", cond_temp))) 
+        cond <- paste(expt_date, "naive", sep="_")
+    if(any(grepl("PLX",cond_temp))) 
+        cond <- paste(expt_date, sapply(strsplit(cond_temp, "_"), "[[", 3), sep="_")
+    if(any(grepl("free",cond_temp))) 
+        cond <- paste(expt_date, "8day8uMPLXCa2free", sep="_")
+    if(any(grepl("Ca2containing",cond_temp))) 
+        cond <- paste(expt_date, "3day8uMPLX_w_Ca2", sep="_")
+    if(any(grepl("MEK",cond_temp))) 
+        cond <- paste(expt_date, "30minMEKi", sep="_")
+    
+
+    d <- read.csv(fpath)
+    d <- convertTime(d)
+    colnames(d) <- fixColnames(colnames(d))
+    d <- d[,intersect(std_colnames,colnames(d))]
+    d$expt_date <- expt_date
+    d$cond <- cond
+    return(d)
+}
+
+sampleROIs <- function(condition, ids=rois, n=100) sample(ids[grep(condition,ids)],n)
+
+plotPCcatch <- function(roi, group_ids=clust$cluster, ...) {
+    groups <- unique(group_ids)
+    mycolors <- dichromat::colorschemes$Categorical.12[seq_along(groups)]
+    plot(pc_catch[['x']][,1], pc_catch[['x']][,2], type="n",
+         xlab="PC1", ylab="PC2", ...)
+    sapply(groups, function(group) points(pc_catch[['x']][which(group_ids==group & rois %in% roi),1], 
+                                          pc_catch[['x']][which(group_ids==group & rois %in% roi),2], 
+                                          col=mycolors[match(group,groups)],
+                                          pch=19, cex=0.5,))
+    return(invisible(NULL))
+}
+
+```
+### Datasets
+20220425 = naive  
+20230426 = untreated  
+20211114 = tolerant? 3 days?  
+20220321_fura2_A375H2bRFP_4day8uMPLX
+20220321_fura2_A375H2bRFP_5day8uMPLX
+20230426_idlingCa2free_pulsing002_V02
+
+```{r Load and compile data}
+fpaths <- c("https://www.dropbox.com/scl/fi/yprt6h4s2khr7sk0kaoav/20230426_untreated_pulsing_mod.csv?rlkey=bt575yvb612cgf1bi23fb9n99&dl=1",
+            "https://www.dropbox.com/scl/fi/fk0fh1trr46aromfqd31k/20220321_fura2_A375H2bRFP_5day8uMPLX.csv?rlkey=jhhm821t8q63c3n6yb6udasxg&dl=1",
+            "https://www.dropbox.com/scl/fi/r0bitvu4ljz19jah9f9p8/20220321_fura2_A375H2bRFP_7day8uMPLX.csv?rlkey=i6wnyo48z5a0v4ovsrgysz2xm&dl=1",
+            "https://www.dropbox.com/scl/fi/9j6dvk9vnar3cn5xe24he/20220321_fura2_A375H2bRFP_10day8uMPLX.csv?rlkey=62l5qpih4oetwrte0k3bk3szr&dl=1",
+            "https://www.dropbox.com/scl/fi/6pq4d62ser0bcsuvwfcpv/20230426_idlingCa2free_pulsing002_V02_mod.csv?rlkey=k19wxifmfh3rn69zdgn0kb3tc&dl=1"
+            )
+
+rawdatapaths <- c("https://www.dropbox.com/scl/fi/f0ap9tuwfldtrjk2pd3yn/20220425_Fura2_naive002.xlsx?rlkey=dx1zwj6ov8zwzqt944jwc05z9&dl=1",
+                  "https://www.dropbox.com/scl/fi/ru1cunsuqgi691ua05dgs/20220425_Fura2_naive003.xlsx?rlkey=f1q7uh454sqjspmr3anabdy1k&dl=1"
+                  )
+
+fp <- "https://www.dropbox.com/s/elwck3cnpzvg4uf/20211114_A375_Ca2%2B_pulsing_data.csv?dl=1"
+
+d <- read.csv(fp)
+colnames(d) <- c("reg_id", "fura_ratio", "time_sec", "time_min")
+d$expt_date <- "20211114"
+d$im_idx <- match(d$time_sec, sort(unique(d$time_sec)))
+colnames(d) <- fixColnames(colnames(d))
+d <- d[,intersect(std_colnames,colnames(d))]
+d$cond <- "20211114_14day8uMPLX"
+
+d <- rbind(d, do.call(rbind, lapply(fpaths, preprocessData)))
+d <- rbind(d, do.call(rbind, lapply(rawdatapaths, processRawXLSX)))
+
+# calculate/adjust columns
+d$reg_id <- paste(d$cond, d$reg_id, sep="_")
+d$intensity_mean <- d$fura_ratio
+
+# ensure all times are a multiple of 5
+d$time_sec <- DescTools::RoundTo(d$time_sec, multiple=5)
+```
+
+
+
+### NOTE
+Experiments are each of different duration. To facilitate interpretation, use number of time points of the shortest dataset for each
+
+```{r}
+expt_dates <- unique(d$expt_date)
+conditions <- unique(d$cond)
+
+n_im_idx <- min(sapply(conditions, function(co) length(unique((d[d$cond==co,"im_idx"])))))
+
+temp <- lapply(unique(d$cond), function(co) {
+    a <- d[d$cond==co,]
+    a <- a[a$time_sec %in% tail(unique(a$time_sec), n_im_idx),]
+    a$time_sec <- DescTools::RoundTo(a$time_sec - min(a$time_sec), multiple=5)
+    # a$time_sec <- seq(0,((n_im_idx-1)*5),5)
+    a$im_idx <- match(a$time_sec, sort(unique(a$time_sec)))
+    rownames(a) <- NULL
+    return(a)
+})
+
+d <- do.call(rbind, temp)
+```
+
+
+```{r}
+rois <- unique(d$reg_id)
+times <- unique(d$time_sec)
+
+# fr = fura2_ratio
+fr <- data.frame(matrix(d$fura_ratio, ncol=length(rois)))
+colnames(fr) <- as.character(rois)
+
+# linear model - intersect
+l <- do.call(c, lapply(conditions, function(co) {
+    apply(fr[,grepl(co,colnames(fr))], 2, function(x) coef(lm(x ~ times))[2])
+}))
+
+
+# mean fura_ratio
+fr_mean <- do.call(cbind,lapply(conditions, function(co) {
+    apply(fr[,grepl(co,colnames(fr))], 1, mean)
+}))
+colnames(fr_mean) <- conditions
+
+# frn = fura2_ratio normalized (mean-centered)
+frn <- do.call(cbind, lapply(conditions, function(co) {
+    apply(fr[,grepl(co,colnames(fr))], 2, function(x) x - fr_mean[,match(co,conditions)])
+}))
+
+d$fura_ratio_norm <- as.vector(frn)
+d$int_mean_norm <- as.vector(frn)
+```
+
+
+### Things to consider
+* DTW  
+* Sum of time above threshold  
+* Stretches of times above threshold
+* Times between spikes
+* Number of spikes
+* Determine the background for each trace
+
+interesting ROIs: 11, 12, 18, 20, 25, 27
+```{r}
+checkthese <- paste("20211114_14day8uMPLX", c(11, 12, 18, 20, 25, 27), sep="_")
+plot(fura_ratio ~ time_sec, data=d[d$reg_id %in% checkthese,], type="n", ylim=c(0,1))
+for(roi in checkthese) lines(fura_ratio ~ time_sec, data=d[d$reg_id==roi,], col=dichromat::colorschemes$Categorical.12[match(roi,checkthese)])
+```
+
+```{r}
+spike_height <- sd(d$fura_ratio_norm)*2.5
+roi_list <- lapply(unique(d$reg_id), function(roi) 
+    {
+        dat <- d[d$reg_id==roi,"fura_ratio_norm"]
+        thresh <- .15
+        out <- data.frame(reg_id=roi,
+                          mean=mean(dat),
+                          sd=sd(dat),
+                          avg.spike.length=avgSpikeLength(dat, threshold=thresh),
+                          num.runs=numRuns(dat, threshold=thresh),
+                          num.spikes=numSpikes(dat,threshold=thresh),
+                          slope=coef(lm(dat ~ times))[2],
+                          intercept=coef(lm(dat ~ times))[1]
+                          )
+        rownames(out) <- NULL
+        return(out)
+    })
+
+sumstats <- do.call(rbind, roi_list)
+sumstats$avg.spike.length[is.na(sumstats$avg.spike.length)] <- 0
+
+catch <- lapply(unique(d$reg_id), function(roi) 
+    {
+        dat <- catch22_all(d[d$reg_id==roi,"fura_ratio_norm"])
+        dat <- as.data.frame(dat)
+        rownames(dat) <- dat[,1]
+        dat$names <- NULL
+        dat <- t(dat)
+
+        return(dat)
+    })
+
+catch <- do.call(rbind, catch)
+rownames(catch) <- unique(d$reg_id)
+```
+
+```{r fig.height=4, fig.width=4}
+pc_catch <- prcomp(scale(catch))
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=19, cex=0.5)
+```
+```{r fig.height=6, fig.width=6}
+biplot(pc_catch, cex=0.5)
+```
+
+
+
+```{r}
+sumstats_scaled <- sumstats
+sumstats_scaled[,-1] <- scale(sumstats_scaled[,-1])
+
+lo_signal <- subset(sumstats, mean<0.05 & sd<0.01)
+lo_ids <- lo_signal$reg_id
+message(paste("There are",nrow(lo_signal),"cells with very low activity"))
+```
+### Catch-22 variables
+Location of low-signal traces in Catch-22 PCA space
+```{r fig.height=4, fig.width=4}
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=19, cex=0.5, xlab="PC1", ylab="PC2")
+points(pc_catch[['x']][lo_signal$reg_id,1], pc_catch[['x']][lo_signal$reg_id,2], pch=19, cex=0.5, col="yellow")
+
+```
+## Boundaries of Catch-22 PCA space
+IDs on the boundaries (manually identified from biplot above)
+604, 522, 210, 870, 946, 539, 542, 744, 675
+
+
+```{r fig.height=4, fig.width=4}
+eps_val <- 2
+clust <- dbscan::dbscan(pc_catch[['x']], eps=eps_val, minPts = 20)
+
+mycols <- rev(dichromat::colorschemes$Categorical.12)[seq(length(unique(clust$cluster)))]
+
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=19, cex=0.5, 
+     col=mycols[clust$cluster+1],
+     xlab="PC1", ylab="PC2")
+mtext(paste("eps=",eps_val,"produced",length(unique(clust$cluster)),"clusters"), 3)
+legend(-12,6,legend=paste("clust",seq(length(unique(clust$cluster)))), col=mycols, pch=19, cex=0.5)
+```
+
+```{r}
+message(cat("With eps=",eps_val,",",length(unique(clust$cluster)), "clusters were identified"))
+diprate::nEach(clust$cluster)
+```
+
+### No spikes looks like cluster==1
+```{r}
+set.seed(10)
+checkthese <- sample(rois[clust$cluster==1], 15)
+plotTraceFura(checkthese, d)
+```
+### Compare to lo_ids
+```{r}
+plotTraceFura(lo_ids[1:15], d)
+```
+```{r}
+all_no_spike_ids <- union(rois[clust$cluster==1],lo_ids)
+length(all_no_spike_ids)
+```
+
+### others (with spikes?) cluster==0
+```{r fig.height=6, fig.width=6}
+set.seed(6)
+checkthese <- sample(rois[clust$cluster==0], 60)
+plotTraceFura(checkthese[1:15], d)
+```
+
+### Criteria
+Philip described a few basic types of traces he sees:
+
+1) no spikes  
+1) periodic spiking (oscillatory)  
+1) sporadic individual spiking (rare and random)  
+1) sporadic sustained spiking  
+1) sustained activation (two-level trace)  
+
+
+### Algorithms for classification
+
+Fast fourier transform  to detect regular oscillatory patterns
+```{r}
+f <- mvfft(as.matrix(frn))
+
+oscil <- sapply(rois, function(roi) any(Re(f[,as.character(roi)])[3:(nrow(f)-3)] > 10))
+roi_oscil <- rois[oscil]
+```
+
+```{r}
+plot(seq(2,nrow(f)-1), tail(head(Re(f[,roi_oscil[2]]),-1),-1), type='l', ylim=c(-1,20))
+```
+
+### Example oscillatory traces
+```{r fig.height=6, fig.width=6}
+plotTraceFura(roi_oscil[11:20], d)
+```
+
+```{r fig.height=4, fig.width=4}
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=19, cex=0.5, 
+     col=c("blue","orange")[(sumstats$reg_id %in% roi_oscil)+1],
+     xlab="PC1", ylab="PC2")
+
+```
+
+### Example traces with hi mean values
+```{r fig.height=6, fig.width=6}
+hi <- sumstats_scaled[sumstats_scaled$mean >=0.1 & sumstats_scaled$sd <= 0,"reg_id"]
+
+plotTraceFura(hi[1:10], d)
+```
+
+
+# Single spikes
+```{r}
+single_spike <- sumstats[sumstats$num.spikes==1,"reg_id"]
+mycols3 <- viridisLite::viridis(n=38)
+```
+
+
+```{r fig.height=8, fig.width=6}
+plotTraceFura(single_spike[1:20], d)
+```
+
+```{r fig.height=6, fig.width=6}
+hi_slope <- rois[which(l>4e-5)]
+plotTraceFura(hi_slope[1:10], d)
+
+```
+
+```{r fig.height=4, fig.width=4}
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=19, cex=0.5, 
+     col=c("blue","orange")[(sumstats$reg_id %in% hi_slope)+1],
+     xlab="PC1", ylab="PC2")
+```
+
+```{r fig.height=4, fig.width=4}
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=19, cex=0.5, xlab="PC1", ylab="PC2")
+points(pc_catch[['x']][single_spike,1], pc_catch[['x']][single_spike,2], pch=19, cex=0.5, col="yellow")
+
+```
+### Expt conditions
+```{r fig.height=4, fig.width=4}
+plot(pc_catch[['x']][,1], pc_catch[['x']][,2], pch=".", cex=0.5, 
+     col=rev(dichromat::colorschemes$Categorical.12)[match(gsub("_[0-9]{1,3}$", "", sumstats$reg_id),conditions)],
+     xlab="PC1", ylab="PC2")
+legend(-13,8, conditions, col=dichromat::colorschemes$Categorical.12[seq_along(conditions)], cex=0.5, pch=19)
+```
+
+
+```{r fig.height=4, fig.width=4}
+set.seed(13)
+my_samples <- invisible(lapply(conditions, function(cond) {
+    a <- sampleROIs(condition=cond)
+    plotPCcatch(a, clust$cluster, main=cond)
+    a
+}))
+```
+
+
+```{r}
+set.seed(13)
+my_samples <- invisible(lapply(conditions, function(cond) {
+    a <- sampleROIs(condition=cond)
+    plotPCcatch(a, as.integer(!rois %in% all_no_spike_ids), main=cond)
+    a
+}))
+```
+
+
+
+```{r fig.height=6, fig.width=6}
+lapply(seq_along(my_samples), function(i) plotTraceFura(my_samples[[i]][!my_samples[[i]] %in% all_no_spike_ids][1:20], d))
+```
+
+### Example traces
+Figure 1B
+```{r fig.height=3.5, fig.width=5}
+exemplar_ids <- c(  "20211114_14day8uMPLX_105",
+                    "20211114_14day8uMPLX_802",
+                    "20211114_14day8uMPLX_297",
+                    "20220321_7day8uMPLX_340",
+                    "20220321_7day8uMPLX_1121",
+                    "20211114_14day8uMPLX_604",
+                    "20211114_14day8uMPLX_20"
+)
+
+spike_examples <- d[d$reg_id %in% exemplar_ids, ]
+spike_examples$reg_id <- factor(spike_examples$reg_id, levels=exemplar_ids)
+
+plotTraceFura(exemplar_ids, spike_examples, yl=c(0.5,1.25))
+
+# ggsave("example_fura2_traces.png", device="png", width=5, height=3.5, units="in")
+```
+
+
+### Plot % in each cluster for each condition
+Perform bootstrapping to get sample statistics. Assessing proportions of cells in clusters 0 and 1 
+
+```{r}
+# filtered objects in naive data (should filter all datasets) with area > 100 µM^2 
+
+set.seed(13)
+
+prop_spiking <- do.call(c, lapply(conditions, function(co) {
+    samp <- lapply(1:100, function(i) sample(rois[grepl(co,rois)],200, replace=TRUE))
+    sapply(samp, function(x) length(which(!x %in% all_no_spike_ids))/200)
+}))
+
+prop_spiking_df <- data.frame(condition=rep(conditions, each=100), 
+                              prop_spiking=prop_spiking)
+
+prop_spiking_cond_df <- prop_spiking_df
+prop_spiking_cond_df$date <-  sapply(strsplit(prop_spiking_cond_df$condition, "_"), "[[", 1)
+prop_spiking_cond_df$condition <-  sapply(strsplit(prop_spiking_cond_df$condition, "_"), "[[", 2)
+prop_spiking_cond_df$condition <-  gsub("day8uMPLX","",prop_spiking_cond_df$condition)
+prop_spiking_cond_df[grep("naive",prop_spiking_cond_df$condition),"condition"] <-  0
+prop_spiking_cond_df$condition <-  factor(prop_spiking_cond_df$condition, levels=c("0", "5","7","10","14"))
+prop_spiking_cond_df <- prop_spiking_cond_df[prop_spiking_cond_df$date != "20230426",]
+```
+
+### Time dependence of spiking behavior
+Figure 1C
+```{r Violin plot, fig.height=4, fig.width=4}
+p <- ggplot(data=prop_spiking_cond_df, aes(x=condition, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    # coord_flip() + 
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=16),
+          axis.text.y = element_text(size=16),
+          axis.title.x = element_text(size=18, face="bold"),
+          axis.title.y = element_text(size=18, face="bold")) + 
+    ylim(c(0,0.75)) +
+    ylab("Proportion spiking") + 
+    xlab("Days in BRAFi")
+p
+
+# ggsave("BRAFi_time_prop_spiking.png", device="png", width=4, height=4, units="in")
+```
+
+
+```{r}
+m <- lm(prop_spiking ~ condition, data=prop_spiking_cond_df)
+a <- aov(m)
+tukey <- TukeyHSD(a)
+tukey$condition
+```
+
+
+### Number of cells per condition
+```{r}
+sapply(conditions, function(co) length(unique(rois[grep(co,rois)])))
+```
+
+
+
+# Analysis of extracellular calcium on long-term BRAFi-treated cell spiking behavior
+## Supplementary Figure S4
+### Analysis of manual quantification of 8 day BRAFi w/o calcium
+Performed by Philip. Will append manually assessed no-spike `reg_id`s to `all_no_spike_ids`.
+
+```{r}
+noCa_8d_manual <- read.csv("../data/20230426_8dBRAFica2free_sample_ids.csv")
+testrois <- c(noCa_8d_manual$reg_id, rois[grepl("20220321_7day8uMPLX",rois)])
+```
+
+
+```{r}
+set.seed(13)
+testconds <- c("20220321_7day8uMPLX","20230426_8day8uMPLXCa2free")
+
+prop_spiking_ca <- do.call(c, lapply(testconds, function(co) {
+    samp <- lapply(1:100, function(i) sample(testrois[grepl(co,testrois)], 200, replace = TRUE))
+    sapply(samp, function(x) length(which(!x %in% c(all_no_spike_ids,noCa_8d_manual$reg_id[noCa_8d_manual$spikes==0])))/200)
+}))
+
+prop_spiking_ca_df <- data.frame(condition=rep(c("Ca2+","no Ca2+"), each=100),
+                                 prop_spiking=prop_spiking_ca)
+
+```
+
+
+### 8 days BRAFi w/o Ca2+ in buffer vs 7 days BRAFi w/ Ca2+ in buffer
+Supplementary Figure S4
+```{r fig.height=3, fig.width=2}
+p <- ggplot(data=prop_spiking_ca_df, aes(x=condition, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + 
+    geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    # coord_flip() +
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size=16, face="bold"),
+          axis.title.y = element_text(size=16, face="bold")) + 
+    # ylim(c(0,0.75)) +
+    ylab("Proportion spiking") + 
+    xlab("") 
+p
+```
+

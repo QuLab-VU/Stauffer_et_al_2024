@@ -1,0 +1,349 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r Setup}
+library(diprate)
+library(ggplot2)
+library(viridis)
+library(tidyr)
+library(ggridges)
+library(dplyr)
+```
+
+### Function to quantify ppERK using both proportion of positive cells and the avg intensity
+Using both proportion of cells staining positively for ppERK and the integrated values of the positive cells.  
+
+```{r}
+ppERKint <- function(dat, signif=4) {
+    cell_count <- nrow(dat)
+    pos_cells <- nrow(dat[dat$positive.w2==1,])
+    val <- pos_cells/cell_count*sum(dat[dat$positive.w2==1,]$avg.pERK)
+    val <- signif(val,signif)
+    return(val)
+}
+```
+
+## Load data
+```{r}
+d <- read.csv("https://www.dropbox.com/scl/fi/mty3qbhtu917pbrvra5kj/202402119_singlecell_all_cpa.csv?rlkey=9fmn41fu22p1l0lpkwf1d21nw&dl=1")
+```
+
+
+# QC
+Removing cells with total area > 4500 and < 100 $pixels^2$  
+Removing objects with integrated intensity > 5e6 because they tend to be bubbles, precipitated antibody, or debris.
+It was found that setting minimum area to above 200 pixels^2 predominantly filtered out data from the Ca2+ free control group. Because of this bias in filtering, minimum area was set to > 100 pixels. 
+
+```{r}
+o_nrow <- nrow(d)
+d <- d[d$total.area < 4500 & d$total.area > 50 & d$w2.stain.integr.intens <5e6,]
+message(cat("Current nrow = ",nrow(d),"\nOriginal nrow = ",o_nrow))
+message(cat("QC removed",signif(100-(nrow(d)/o_nrow*100),2),"% of cells"))
+```
+
+### `drug2.conc` missing in data
+Had to remove from `keepcols`
+```{r}
+keepcols <- c("cell.line","drug1","drug1.conc","drug2","well",
+              "BRAFi.tx.time","iono.tx.time",
+              "cell.id","total.area","positive.w2","w2.stain.area","w2.stain.integr.intens", "avg.pERK")
+
+d <- d[,keepcols]
+```
+
+
+```{r}
+ab_ctrl_wells <- unique(d[d$drug1=="" & d$drug2=="",]$well)
+untx_ctrl_wells <- unique(d[d$drug2=="control",]$well)
+ctrl_wells <- c(ab_ctrl_wells,untx_ctrl_wells)
+
+d[is.na(d$drug1.conc),"drug1.conc"] <- 0
+d[is.na(d$drug2.conc),"drug2.conc"] <- 0
+
+d[d$drug1=="","drug1"] <- "control"
+
+tx <- tibble(d[!d$well %in% ctrl_wells, ])
+tx <- tx[order(tx$BRAFi.tx.time),]
+
+rownames(tx) <- NULL
+
+ctrls <- d[d$well %in% ctrl_wells, ]
+
+tx$drug1.conc <- signif(tx$drug1.conc, digits= 2)
+tx$drug1 <- factor(tx$drug1)
+```
+
+### Controls 
+* `drug1 == "holiday"`: BRAFi-treated cells given a "holiday"; replaced medium with FBS-free, undrugged media
+* `drug1 == "persistent"`: BRAFi maintained, no agonist added
+* `drug1 == "control"`: Drug-naive cells in FBS free medium (no PLX or ionomycin ever added)
+* `drug1 == "controlFBS"`: Drug-naive cells in FBS-containing medium
+* `drug1 == "" & drug2 == ""`: Antibody controls (1° and 2°) 
+
+```{r}
+ctrlType <- function(drug1)
+    switch(drug1,
+           controlFBS="naive_wFBS",
+           control="naive_woFBS",
+           drug1
+           )
+
+
+d$ctrl_type <- sapply(d$drug1, function(x) 
+    ifelse(x %in% c("","control","controlFBS","holiday","persistent"),ctrlType(x),""))
+
+d[d$drug1=="" & is.na(d$drug2),"ctrl_type"] <- "ab_ctrl"
+d[d$ctrl_type=="","ctrl_type"] <- NA
+d$ctrl_type <- factor(d$ctrl_type)
+unique(d$ctrl_type)
+```
+
+```{r}
+dtp <- d[!is.na(d$ctrl_type),]
+```
+
+```{r message=FALSE, warning=FALSE}
+ggplot(dtp, aes(x = avg.pERK, y = ctrl_type, fill = after_stat(x))) + 
+    xlim(-1,1.5) + 
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+    labs(title = 'Controls', 
+         subtitle="") + 
+    xlab("Mean ppERK/cell (A.U.)") + ylab("Control condition")
+
+```
+
+
+
+```{r}
+tx <- d[is.na(d$ctrl_type),]
+drugs <- unique(tx$drug1)
+```
+
+```{r}
+ppdf <-tx %>%
+    group_by(BRAFi.tx.time, drug1, drug1.conc, iono.tx.time, positive.w2) %>%
+    summarise(num= n()) 
+
+
+ppdf$positive.w2 <- rep(c("negative","positive"), nrow(ppdf)/2)
+
+pct.pos <- ppdf %>%
+    spread(positive.w2, num) %>%
+    mutate(total= negative+positive) %>%
+    summarise(propos= positive/total) %>%
+    ungroup()
+```
+
+
+```{r message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="Ionomycin" & tx$BRAFi.tx.time=="3 days",]
+
+
+g <- lapply(unique(dat$drug1.conc), function(dc) {
+    dtp <- dat[dat$drug1.conc==dc,]
+    dtp <- dtp[order(dtp$iono.tx.time),]
+    
+    n_vals <- pct.pos[pct.pos$drug1.conc==dc & pct.pos$BRAFi.tx.time =="3 days" & pct.pos$drug1== "Ionomycin",]
+    n_vals$propos <- signif(n_vals$propos*100, 3)
+    
+    ppERK_vals <- sapply(unique(dtp$iono.tx.time), function(tt) ppERKint(dtp[dtp$iono.tx.time==tt,]))
+    names(ppERK_vals) <- unique(dtp$iono.tx.time)
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+    
+    out <- ggplot(dtp, aes(x = avg.pERK, y = factor(iono.tx.time), fill = after_stat(x))) + 
+        xlim(-1,1.5) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = 'Drug-tolerant cells', 
+             subtitle=paste(unique(dtp$drug1),dc)) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Time after Tx") + 
+        annotate("text", x=1.5, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+        
+        
+        annotate("text", x=1.5, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==1,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==5,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==10,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==15,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==20,"propos"]), size=2.5) +
+        annotate("text", x=1.5, y=1.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.5, y=2.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==5,])), size=2.5) + 
+        annotate("text", x=1.5, y=3.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.5, y=4.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==15,])), size=2.5) + 
+        annotate("text", x=1.5, y=5.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==20,])), size=2.5) 
+
+    out
+})
+
+g
+```
+```{r message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="Ionomycin" & tx$BRAFi.tx.time=="60 min",]
+
+
+g <- lapply(unique(dat$drug1.conc), function(dc) {
+    dtp <- dat[dat$drug1.conc==dc,]
+    dtp <- dtp[order(dtp$iono.tx.time),]
+    
+    n_vals <- pct.pos[pct.pos$drug1.conc==dc & pct.pos$BRAFi.tx.time =="60 min"  & pct.pos$drug1== "Ionomycin",]
+    n_vals$propos <- signif(n_vals$propos*100, 3)
+    
+    ppERK_vals <- sapply(unique(dtp$iono.tx.time), function(tt) ppERKint(dtp[dtp$iono.tx.time==tt,]))
+    names(ppERK_vals) <- unique(dtp$iono.tx.time)
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+    
+    out <- ggplot(dtp, aes(x = avg.pERK, y = factor(iono.tx.time), fill = after_stat(x))) + 
+        xlim(-1,1.5) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = 'Drug-sensitive cells', 
+             subtitle=paste(unique(dtp$drug1),dc)) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Time after Tx") + 
+        annotate("text", x=1.5, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+        
+        
+        annotate("text", x=1.5, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==1,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==5,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==10,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==15,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==20,"propos"]), size=2.5) +
+        annotate("text", x=1.5, y=1.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.5, y=2.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==5,])), size=2.5) + 
+        annotate("text", x=1.5, y=3.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.5, y=4.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==15,])), size=2.5) + 
+        annotate("text", x=1.5, y=5.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==20,])), size=2.5) 
+
+    out
+})
+
+g
+```
+
+
+```{r message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="CPA" & tx$BRAFi.tx.time=="3 days",]
+
+
+g <- lapply(unique(dat$drug1.conc), function(dc) {
+    dtp <- dat[dat$drug1.conc==dc,]
+    dtp <- dtp[order(dtp$iono.tx.time),]
+    
+    n_vals <- pct.pos[pct.pos$drug1.conc==dc & pct.pos$BRAFi.tx.time =="3 days" & pct.pos$drug1== "CPA",]
+    n_vals$propos <- signif(n_vals$propos*100, 3)
+    
+    ppERK_vals <- sapply(unique(dtp$iono.tx.time), function(tt) ppERKint(dtp[dtp$iono.tx.time==tt,]))
+    names(ppERK_vals) <- unique(dtp$iono.tx.time)
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+    
+    out <- ggplot(dtp, aes(x = avg.pERK, y = factor(iono.tx.time), fill = after_stat(x))) + 
+        xlim(-1,1.5) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = 'Drug-tolerant cells', 
+             subtitle=paste(unique(dtp$drug1),dc)) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Time after Tx") + 
+        annotate("text", x=1.5, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+        
+        
+        annotate("text", x=1.5, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==1,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==5,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==10,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==15,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==20,"propos"]), size=2.5) +
+        annotate("text", x=1.5, y=1.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.5, y=2.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==5,])), size=2.5) + 
+        annotate("text", x=1.5, y=3.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.5, y=4.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==15,])), size=2.5) + 
+        annotate("text", x=1.5, y=5.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==20,])), size=2.5) 
+
+    out
+})
+
+g
+
+
+
+dat <- tx[tx$drug1=="CPA" & tx$BRAFi.tx.time=="60 min",]
+
+
+g <- lapply(unique(dat$drug1.conc), function(dc) {
+    dtp <- dat[dat$drug1.conc==dc,]
+    dtp <- dtp[order(dtp$iono.tx.time),]
+    
+    n_vals <- pct.pos[pct.pos$drug1.conc==dc & pct.pos$BRAFi.tx.time =="60 min"  & pct.pos$drug1== "CPA",]
+    n_vals$propos <- signif(n_vals$propos*100, 3)
+    
+    ppERK_vals <- sapply(unique(dtp$iono.tx.time), function(tt) ppERKint(dtp[dtp$iono.tx.time==tt,]))
+    names(ppERK_vals) <- unique(dtp$iono.tx.time)
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+    
+    out <- ggplot(dtp, aes(x = avg.pERK, y = factor(iono.tx.time), fill = after_stat(x))) + 
+        xlim(-1,1.5) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = 'Drug-sensitive cells', 
+             subtitle=paste(unique(dtp$drug1),dc)) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Time after Tx") + 
+        annotate("text", x=1.5, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+        
+        
+        annotate("text", x=1.5, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==1,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==5,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==10,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==15,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.5, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$iono.tx.time==20,"propos"]), size=2.5) +
+        annotate("text", x=1.5, y=1.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.5, y=2.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==5,])), size=2.5) + 
+        annotate("text", x=1.5, y=3.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.5, y=4.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==15,])), size=2.5) + 
+        annotate("text", x=1.5, y=5.5, label= paste("n =",nrow(dtp[dtp$iono.tx.time==20,])), size=2.5) 
+
+    out
+})
+
+g
+```
+
+
+
+

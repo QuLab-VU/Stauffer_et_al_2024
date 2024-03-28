@@ -1,0 +1,98 @@
+---
+title: "20230425 ATP stimulation Ca2+ imaging"
+output: html_notebook
+---
+ 
+# Analysis -- ATP Ca2+ signaling: 20230425_ATPsignaling_Fura2_DavidScope
+
+eLab entry: 20230425_ATPsignaling_Fura2_David'sScope
+
+Raw data contained in stauffpe Typhon server in directory 20230426_purinergictest.
+Segmentation of single cells was performed on NIS analysis software.
+Quantifications of Fura2AM emissions exported as CSV.
+
+```{r Setup}
+library(ggplot2)
+library(tidyr)
+library(viridis)
+library(dplyr)
+```
+
+
+## Load data
+```{r}
+d <- read.csv("../data/20230425_ATPstim_singlecell_all.csv")
+```
+
+
+### Make ROIs into factor levels
+```{r}
+level <- sort(unique(d$ROI))
+d$ROI.fl <- factor(d$ROI, levels= as.character(level))
+```
+
+
+### Normalizing ratio signal to the starting point of each ROI
+```{r}
+#split back into different treatment groups
+dUT <- d[d$BRAFi.tx == "UT",]
+dI <- d[d$BRAFi.tx== "idling",]
+
+#make empty dataframes for loops to put data into
+dnUT <- data.frame()
+dnI <- data.frame()
+
+for(i in unique(dUT$ROI)){
+  temp <- dUT[dUT$ROI == i, ]
+  temp$normratio <- temp$ratio / mean(temp$ratio[temp$sec.total < 100])
+  dnUT <- rbind(dnUT, temp)
+}
+
+for(i in unique(dI$ROI)){
+  temp <- dI[dI$ROI == i, ]
+  temp$normratio <- temp$ratio / mean(temp$ratio[temp$sec.total < 100])
+  dnI <- rbind(dnI, temp)
+}
+```
+
+### Calculating mean and standard error
+```{r}
+#idling cells
+dnI$normratio2 <- dnI$normratio
+avgdnI <- dnI %>%
+    group_by(sec.total, BRAFi.tx) %>%
+    summarise(mean = mean(normratio), sd = sd(normratio2)) %>%
+    mutate(sdhigh= mean+sd, sdlow= mean-sd)
+
+
+#untreated cells
+dnUT$normratio2 <- dnUT$normratio
+avgdnUT <- dnUT %>%
+    group_by(sec.total, BRAFi.tx) %>%
+    summarise(mean = mean(normratio), sd = sd(normratio2)) %>%
+    mutate(sdhigh= mean+sd, sdlow= mean-sd)
+
+avgdn <- rbind(avgdnUT, avgdnI)
+```
+### adjust BRAFi.tx names to match Untreated and Drug Tolerant nomeclature of other figures
+```{r}
+avgdn$BRAFi.tx[avgdn$BRAFi.tx== "idling"] <- "Drug Tolerant"
+avgdn$BRAFi.tx[avgdn$BRAFi.tx== "UT"] <- "Untreated"
+```
+
+
+
+### Plotting average traces with associated standard deviation
+```{r}
+
+ggplot(data= avgdn, aes(y= mean, x=sec.total, color= BRAFi.tx, )) +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold")) + 
+    geom_line() + 
+    geom_ribbon(aes(ymax= sdhigh, ymin= sdlow, group= BRAFi.tx), alpha=0.2, fill= "grey65", outline.type = "both") +
+    labs(title= "ATP stimulated Ca2+ response", y= "\u0394F/F0", x= "Time (seconds)", color= "BRAFi condition")
+
+# ggsave(filename = "ATP-induced_Ca2+.pdf", device = cairo_pdf, width=3.5, height=2.5, units="in")
+```
+
+
