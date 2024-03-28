@@ -13,7 +13,7 @@ Copying code from "20240111_manual_spike_analysis.Rmd"
 
 ### 2024-01-22 data 97606PS14
 ```{r}
-source("traceAnalysisFxns.r")
+source("../main_fig_code/traceAnalysisFxns.r")
 ```
 
 
@@ -37,7 +37,7 @@ platemap[platemap$well %in% wells,]
 ```
 
 ```{r}
-set.seed(13)
+set.seed(2)
 prop_spiking <- do.call(c, lapply(unique(conditions), function(co) {
     n <- 75
     wells_for_sampling <- wells[conditions==co]

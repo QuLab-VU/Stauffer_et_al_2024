@@ -11,7 +11,7 @@ Copying code from "Calbryte trace analysis 20240125 97607PS15.Rmd"
 ### 2024-01-05 ATPstim.wave data 
 
 ```{r}
-source("traceAnalysisFxns.r")
+source("../main_fig_code/traceAnalysisFxns.r")
 library(forcats)
 ```
 
