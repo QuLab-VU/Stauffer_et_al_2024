@@ -1,0 +1,368 @@
+---
+title: "Drug-tolerant melanoma RNAseq analysis"
+output: html_notebook
+author: Darren Tyson & Philip Stauffer
+date: 2023-08-29
+---
+# Analysis of RNA-seq data
+Four BRAF-mutant melanoma cell lines (A375, SKMEL28, SKMEL5 and WM88) in standard culture medium (naive) or treated with BRAFi (8µM PLX4720) for 8 days (tolerant). Illumina Novaseq paired end reads.
+
+
+```{r Setup, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(EnhancedVolcano)
+library(org.Hs.eg.db)
+library(ggplot2)
+
+OVERWRITE <- FALSE
+OUTPUT_DIR <- file.path("~/P2RX7_ms_output")
+if(!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR)
+```
+
+
+```{r}
+d <- read.csv("../data/STARquantMode_genecounts_all.csv", row.names = 1)
+genes <- rownames(d)
+
+samples <- colnames(d)
+cell_lines <- factor(sapply(strsplit(samples, "_"), "[[", 1))
+conds <- factor(ifelse(sapply(strsplit(samples, "_"), "[[", 2)=="8day","tolerant","naive"))
+reps <- factor(gsub("rep","",sapply(strsplit(samples, "_"), "[[", 3)))
+coldat <- data.frame(cell_line=cell_lines,condition=conds,rep=reps)
+coldat$group <- factor(paste(coldat$cell_line,coldat$condition,sep="_"))
+
+lowgenes <- rownames(d[apply(d,1,function(x) all(x<10)),])
+```
+
+### Make DESeq dataset
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = d,
+                              colData = coldat,
+                              design = ~ cell_line + condition)
+
+```
+
+### Set reference condition
+Using drug-tolerant A375 cells as reference.
+
+Maintaining low-expressed genes reduces the impact of cell line-specific differences in gene expression. 
+```{r}
+dds$cell_line <- relevel(dds$cell_line, ref = "A375")
+dds$condition <- relevel(dds$condition, ref = "tolerant")
+
+dds <- DESeq(dds)
+```
+
+### Normalized counts
+```{r}
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+```
+
+### Variance stabilization for PCA
+```{r}
+res <- results(dds)
+vsd <- vst(dds, blind=FALSE)
+```
+
+### % of genes that are both `is.na(padj)` and in `lowgenes`
+Missing values for padj are highly enriched in low-expressed genes.
+```{r}
+cat(paste(signif(length(which(rownames(res)[which(is.na(res$padj))] %in% lowgenes))/length(rownames(res)[which(is.na(res$padj))])*100,4),"% of genes with padj == NA are in lowgenes"))
+```
+
+### PCA of variance-stabilized data
+```{r}
+pcaData <- plotPCA(vsd, intgroup=c("condition", "cell_line"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=cell_line)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+```
+
+
+### Specifically examine tolerant vs naive
+Ignoring cell line-specific differences. 
+```{r}
+res_tolerant <- results(dds, contrast=c("condition","tolerant","naive"))
+res_tolerant <- res_tolerant[order(res_tolerant$padj),]
+res_tolerant <- res_tolerant[!is.na(res_tolerant$padj),]
+summary(res_tolerant)
+```
+
+## Volcano plot of differential gene expression
+```{r fig.height=5, fig.width=6, warning=FALSE}
+ggp <- EnhancedVolcano(res_tolerant,
+    lab = rownames(res_tolerant),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 1e-03,
+    pCutoffCol = "padj",
+    title = "Drug-tolerant vs naive",
+    subtitle = bquote(italic("all samples, all genes")),
+    axisLabSize=9,
+    labSize=1.5, legendLabSize=7, legendIconSize=1, pointSize=1,
+    titleLabSize=12, subtitleLabSize=10, captionLabSize=10,
+    shape = 20,
+    col = c("grey30", "grey60", "orange", "red2"),
+    max.overlaps = 20,
+    borderWidth = 0.6,
+    encircleSize = 1
+    )
+ggp
+```
+
+```{r}
+mylabels <- c("ABCB5","MERTK","NGFR","AXL","EGFR","TYRP1","DCT","EDNRB","PPARGC1A",
+              "TRPM1","TRPM8","P2RX4","P2RX7","CACNA1C","PANX2","CACNA1D",
+              "TRPC4","NFATC4",
+              "SLC24A2","SPRY4","EREG","MITF",
+              "ETV5","ETV4","SPRY1",
+              "CCND2","CXCL12")
+```
+
+
+
+```{r fig.height=5, fig.width=4, warning=FALSE}
+ggp <- EnhancedVolcano(res_tolerant,
+    lab = rownames(res_tolerant),
+    selectLab = mylabels,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    xlim=c(-6,9),
+    ylim=c(0,75),    
+    pCutoff = 1e-03,
+    pCutoffCol = "padj",
+    title = "Drug-tolerant vs naive",
+    subtitle = bquote(italic("all samples")),
+    axisLabSize=9,
+    labSize=1.25, legendLabSize=7, legendIconSize=1, pointSize=1,
+    titleLabSize=12, subtitleLabSize=10, captionLabSize=10,
+    shape = 20,
+    col = c("grey30", "grey60", "orange", "red2"),
+    drawConnectors = TRUE,
+    widthConnectors = .5,
+    typeConnectors = "closed",
+    endsConnectors = "last",
+    boxedLabels = TRUE,
+    max.overlaps = 20,
+    borderWidth = 0.6,
+    encircleSize = 1
+    )
+ggp
+
+fn <- file.path(OUTPUT_DIR,"Volcano_avg_taller.pdf")
+if(OVERWRITE | !file.exists(fn))
+  ggsave(file=fn, device="pdf", width=4, height=5, units="in")
+```
+
+### Gene enrichment ontology analysis
+Using Benjamini-Hochberg-adjusted p-value of 0.05 and 1.5-fold change of expression as cutoffs.
+```{r}
+upreg_genes <- subset(res_tolerant, padj<0.05 & log2FoldChange>0.5849625)
+downreg_genes <-subset(res_tolerant, padj<0.05 & log2FoldChange<(-0.5849625))
+
+geneList_up <- as.vector(upreg_genes$log2FoldChange)
+names(geneList_up) <- rownames(upreg_genes)
+geneList_down <- as.vector(downreg_genes$log2FoldChange)
+names(geneList_down) <- rownames(downreg_genes)
+
+genes_up <- as.vector(rownames(upreg_genes))
+genes_down <- as.vector(rownames(downreg_genes))
+```
+
+### Using `clusterProfiler` to perform gene ontology enrichment analysis
+https://bioconductor.org/packages/release/bioc/vignettes/clusterProfiler/inst/doc/clusterProfiler.html
+
+```{r}
+ggo_up <- clusterProfiler::groupGO(gene  = genes_up,
+                                OrgDb    = org.Hs.eg.db,
+                                keyType  = "SYMBOL",
+                                ont      = "MF",
+                                level    = 3,
+                                readable = TRUE)
+ggo_up <- as.data.frame(ggo_up)
+ggo_up <- ggo_up[order(-ggo_up$Count),] 
+ego_genesUp <- clusterProfiler::enrichGO(gene  = genes_up,
+                                 OrgDb         = org.Hs.eg.db,
+                                 keyType  = "SYMBOL",
+                                 ont           = "MF",
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff  = 0.05,
+                                 qvalueCutoff  = 0.05, 
+                                 readable      = TRUE)
+```
+
+```{r}
+clusterProfiler::dotplot(ego_genesUp) + 
+  ggtitle("GO Over-representation Upregulated Genes") +
+  labs(x="Gene Ratio", y="GO Terms") +
+  theme(legend.text = element_text(size = 8),
+        plot.title = element_text(size = 12, hjust = 0.5, face = "bold"), 
+        axis.text=element_text(size=8),
+        legend.title = element_text(size=8,face="bold"), 
+        axis.title=element_text(size=9, face="bold"))
+
+fn <- file.path(OUTPUT_DIR,"GO_upreg.pdf")
+if(OVERWRITE | !file.exists(fn))
+  ggsave(file=fn, device="pdf", width=6, height=4, units="in")
+```
+
+```{r}
+ggo_down <- clusterProfiler::groupGO(gene  = genes_down,
+                                OrgDb    = org.Hs.eg.db,
+                                keyType  = "SYMBOL",
+                                ont      = "MF",
+                                level    = 3,
+                                readable = TRUE)
+ggo_down <- as.data.frame(ggo_down)
+ggo_down <- ggo_down[order(-ggo_down$Count),] 
+ego_genesDown <- clusterProfiler::enrichGO(gene  = genes_down,
+                                 OrgDb         = org.Hs.eg.db,
+                                 keyType       = "SYMBOL",
+                                 ont           = "MF",
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff  = 0.05,
+                                 qvalueCutoff  = 0.05, 
+                                 readable      = TRUE)
+```
+
+```{r}
+clusterProfiler::dotplot(ego_genesDown) + 
+  ggtitle("GO Over-representation Downregulated Genes") +
+  labs(x="Gene Ratio", y="GO Terms") +
+  theme(legend.text = element_text(size = 8),
+        plot.title = element_text(size = 12, hjust = 0.5, face = "bold"), 
+        axis.text=element_text(size=8),
+        legend.title = element_text(size=8,face="bold"), 
+        axis.title=element_text(size=9, face="bold"))
+```
+
+
+
+```{r}
+upgenes_filtered <- as.data.frame(upreg_genes[order(upreg_genes$log2FoldChange,
+                                                    decreasing=TRUE),])
+
+upgenes_filtered <- subset(upgenes_filtered, log2FoldChange>1.5 & 
+                             padj < 1e-4 & baseMean > 200)
+
+### Exclude LINC (long noncoding RNAs) and LOC (unannotated) genes
+upgenes_filtered <- subset(upgenes_filtered, !grepl("^L[OI][CN]",rownames(upgenes_filtered)))
+
+upgenes_filtered
+```
+
+
+Calcium ion transport gene ontologies:  
+https://www.informatics.jax.org/vocab/gene_ontology/GO:0006816
+
+calcium ion transmembrane transport  
+GO:0070588  
+
+Amino acid transporter 
+GO:0006865  
+
+monoatomic cation channel activity
+GO:0005261
+
+```{r}
+go_enriched2 <- strsplit(ego_genesUp@result["GO:0005261","geneID"],"/")
+names(go_enriched2) <- "GO:0005261"
+
+go_labels <- unlist(go_enriched2[[1]])
+x <- res_tolerant[go_labels,c("log2FoldChange","padj")]
+x <- x[order(x$log2FoldChange, decreasing=TRUE),]
+go_labels <- rownames(x)
+
+go_labels2 <- c("KCND3","KCNQ3","KCNB1","P2RX7","KCNJ13","P2RX1","TMEM63C","CACNA1D","CACNA1C")
+```
+
+```{r fig.height=5, fig.width=6, warning=FALSE}
+ggp <- EnhancedVolcano(res_tolerant,
+    lab = rownames(res_tolerant),
+    selectLab = go_labels,
+    title = "Genes associated with monoatomic cation channel activity",
+    subtitle = bquote(italic(GO:0005261)),
+    caption = paste0("total = ", nrow(res_tolerant), " genes"),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 1e-02,
+    pCutoffCol = "padj",
+    xlim=c(-1,6),
+    ylim=c(0,60),
+    axisLabSize=9,
+    labSize=1.25, legendLabSize=7, legendIconSize=1, pointSize=1,
+    titleLabSize=12, subtitleLabSize=10, captionLabSize=10,
+    shape = 20,
+    col = c("grey30", "grey60", "orange", "red2"),
+    drawConnectors = TRUE,
+    widthConnectors = .5,
+    typeConnectors = "closed",
+    endsConnectors = "last",
+    boxedLabels = TRUE,
+    max.overlaps = 20,
+    borderWidth = 0.6,
+    encircleSize = 1
+    )
+ggp
+
+fn <- file.path(OUTPUT_DIR,"Volcano_avg_GO-5261.pdf")
+if(OVERWRITE | !file.exists(fn))
+  ggsave(file=fn, device="pdf", width=6, height=4, units="in")
+```
+
+### Plotting function for gene expression levels across cell line data (drug-tolerant vs naive)
+```{r}
+plot_naive_v_tol <- function(gene, yl=c(-2,18)){
+  gene <- gene[1] # use only first item
+  x <- cbind(coldat,gene=as.integer(normalized_counts[gene,]))
+  g <- ggplot(x, aes(cell_line, log2(gene), color=condition, shape=condition)) +
+    geom_jitter(width = .075, size=2) + 
+    theme_classic() + 
+    theme(legend.position = "top", legend.direction = "horizontal") + 
+    theme(legend.title = element_text(size=0), legend.text = element_text(size=8)) + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+    labs(y="log2(normalized counts)", x="", title=gene) + 
+    scale_y_continuous(limits=yl, breaks=seq(yl[1],yl[2],2))
+  g
+}
+```
+
+
+```{r fig.height=3, fig.width=1.5}
+plot_naive_v_tol("ATP1A1", yl=c(14,19))
+plot_naive_v_tol("P2RX7")
+```
+
+
+```{r}
+downreg_genes["ITPR2",]
+```
+
+
+
+```{r fig.height=3, fig.width=1.5}
+plot_naive_v_tol("ITPR2", yl=c(8,13))
+plot_naive_v_tol("ITPR3",yl=c(11,15))
+```
+
+
+```{r}
+downreg_genes["CALB2",]
+```
+
+```{r fig.height=3, fig.width=1.5}
+p <- list(plot_naive_v_tol("CACNA1C",yl=c(-2,8)),
+          plot_naive_v_tol("CACNA1D",yl=c(2,10)),
+          plot_naive_v_tol("P2RX4",yl=c(4,14)),
+          plot_naive_v_tol("P2RX1", yl=c(-2,8)),
+          plot_naive_v_tol("P2RX7", yl=c(2,16)),
+          plot_naive_v_tol("ITPR2",yl=c(8,13)),
+          plot_naive_v_tol("CALB2", yl=c(-2,12)),
+          plot_naive_v_tol("ATP2B2", yl=c(-2,8)))
+p
+```
+

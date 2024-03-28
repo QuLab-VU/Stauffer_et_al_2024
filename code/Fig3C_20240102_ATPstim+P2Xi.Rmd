@@ -1,0 +1,200 @@
+---
+title: "R Notebook"
+output: html_notebook
+date: 2024-02-23
+author: "Philip Stauffer and Darren Tyson"
+---
+
+## Copied from 20240102_analysis_PES_ridges.Rmd
+
+# ATP stim: 20240102_ATPstim_3dayPLX_longstim -- FBS free media in the assay
+First pass visualizing the results of the experiment (details can be found on elab).
+See `~/Melanoma/Ca2Mobilization/20240102_ATPstim_3dayPLX` directory for thunor .tsv platemap and for barcode information.
+
+pERK staining procedure and imaging details can be found in the elab entry titled 20231116_ATPstim
+
+## Data processing details
+MetaExpress multiwavelength cell scoring analysis performed with the settings saved in:
+"VQU_PES_Ca2+ mobilization"
+
+
+```{r Setup}
+library(tidyr)
+library(ggplot2)
+library(ggridges)
+library(dplyr)
+library(viridis)
+```
+
+### Function to quantify ppERK using both proportion of positive cells and the avg intensity
+Using both proportion of cells staining positively for ppERK and the integrated values of the positive cells.  
+
+```{r}
+ppERKint <- function(dat, signif=4) {
+    cell_count <- nrow(dat)
+    pos_cells <- nrow(dat[dat$positive.w2==1,])
+    val <- pos_cells/cell_count*sum(dat[dat$positive.w2==1,]$avg.pERK)
+    val <- signif(val,signif)
+    return(val)
+}
+```
+
+## Load data
+```{r}
+fn <- "https://www.dropbox.com/scl/fi/xgjbo711hr5mru5axfhh3/20240102_singlecell_all_ATP.csv?rlkey=fzbzg5h0g25ponw1igw5kizdu&dl=1"
+d <- read.csv(fn)
+```
+
+# QC
+Removing cells with total area > 4500 and < 100 $pixels^2$  
+Removing objects with integrated intensity > 5e6 because they tend to be bubbles, precipitated antibody, or debris.
+It was found that setting minimum area to above 200 pixels^2 predominantly filtered out data from the Ca2+ free control group. Because of this bias in filtering, minimum area was set to > 100 pixels. 
+
+### Filtering (QC)
+NOTE: DRT increased filter for total.area to 100 pixels^2
+```{r}
+o_nrow <- nrow(d)
+d <- d[d$total.area < 4500 & d$total.area > 100 & d$w2.stain.integr.intens <5e6,]
+message(cat("Current nrow = ",nrow(d),"\nOriginal nrow = ",o_nrow))
+message(cat("QC removed",signif(100-(nrow(d)/o_nrow*100),2),"% of cells"))
+```
+
+
+### Annotation
+* Columns 17 and 18: untreated control; all others: 8 µM PLX-4720 for 3 days 
+** column 17 had serum free media added; column 18 had serum containing media added
+* When `drug1== "persistent"`, that is the no ATM stim control (within column 17) for a background reference
+* When `drug1== "veh"`, that is when there is ATP added without inhibitor present; this is the baseline response for each drug at each time point.
+* When `drug1== "control"`, that is the drug naive control (column 18) with serum free media added
+* When `drug1== ""` & `drug2== ""`, that is the antibody control
+
+
+```{r}
+d$drug1[d$drug1== ""] <- "abctrl"
+ab_ctrl_wells <- unique(d[d$drug1=="abctrl",]$well)
+untx_ctrl_wells <- unique(d[d$drug1=="control",]$well)
+ctrl_wells <- c(ab_ctrl_wells,untx_ctrl_wells)
+
+d[is.na(d$drug1.conc),"drug1.conc"] <- -1
+
+
+tx <- tibble(d[!d$well %in% ctrl_wells, ])
+tx <- tx[order(tx$BRAFi.tx.time),]
+
+rownames(tx) <- NULL
+
+ctrls <- d[d$well %in% ctrl_wells, ]
+
+tx$drug1.conc <- signif(tx$drug1.conc, digits= 2)
+tx$drug2[tx$drug1== "persistent"] <- 0
+```
+
+
+```{r message=FALSE, warning=FALSE}
+ggplot(d[d$well %in% ctrl_wells, ], aes(x = avg.pERK, y = drug1, fill = after_stat(x))) + 
+    xlim(-1,1.5) + 
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+    labs(title = 'Controls', 
+         subtitle="") + 
+    xlab("Mean ppERK/cell (A.U.)") + ylab("Control condition")
+
+ggplot(tx[tx$drug1 %in% c("persistent", "veh"),], aes(x = avg.pERK, y = drug1, fill = after_stat(x))) + 
+    xlim(-1,1.5) + 
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+    labs(title = 'ATP stim vs no ATP stim', 
+         subtitle="") + 
+    xlab("Mean ppERK/cell (A.U.)") + ylab("Control condition")
+
+```
+
+
+### Determine percent positive for each condition using bootstrapping
+```{r}
+f <- tx[,c("cell.id", "plate.id", "well", "BRAFi.tx.time", "atp.tx.time", "drug1", "drug1.conc", "total.area", "positive.w2","w2.stain.integr.intens")]
+
+f <- f[f$atp.tx.time %in% c(0,1,30),]
+f <- f[order(f$plate.id, f$well),]
+rownames(f) <- NULL
+
+f$uid <- paste(f$plate.id, f$well, sep="_")
+uids <- unique(f$uid)
+f$condition <- paste(f$plate.id, f$well, f$atp.tx.time, f$drug1, f$drug1.conc, sep="_")
+conditions <- f[!duplicated(f$uid),]$condition
+conditions_plates <- sapply(strsplit(conditions, "_"), "[[", 1)
+conditions_atp_time <- sapply(strsplit(conditions, "_"), "[[", 3)
+
+no_ppERK_ids <- f[f$positive.w2==0,]$cell.id
+```
+
+### Drugs on each plate
+```{r}
+unique(f[f$plate.id=="142708",]$drug1)
+```
+
+```{r}
+unique(f[f$plate.id=="142709",]$drug1)
+```
+
+
+```{r}
+
+set.seed(13)
+n <- 1000
+
+prop_pos <- do.call(c, lapply(uids, function(id) {
+    cellids <- f[f$uid==id,]$cell.id
+    cid_samples <- lapply(1:10, function(i) sample(cellids, n))
+    unlist(lapply(cid_samples, function(cids) length(which(f[f$cell.id %in% cids,]$positive.w2==1))/nrow(f[f$cell.id %in% cids,])))
+}))
+
+prop_pos_df <- data.frame(uid=rep(uids, each=10), 
+                              condition=rep(conditions, each=10),
+                              prop_pos=prop_pos)
+```
+
+```{r}
+prop_pos_df$cond2 <- gsub("_[A-P][0-2][0-9]_","_",prop_pos_df$condition)
+mean_props <- sapply(unique(prop_pos_df$cond2), function(co) mean(prop_pos_df[prop_pos_df$cond2==co,]$prop_pos))
+
+veh_mean_props <- mean_props[grep("veh", names(mean_props))]
+veh_mean_prop_range <- sapply(142708:142709, function(x) 
+    veh_mean_props[grep(x,names(veh_mean_props))][1] - 
+      veh_mean_props[grep(x,names(veh_mean_props))][2])
+
+b <- prop_pos_df[(grepl("_30_",prop_pos_df$condition) & 
+                    grepl(9.8e-08, prop_pos_df$condition)) | grepl("veh", prop_pos_df$condition),]
+b$drug1 <- sapply(strsplit(b$condition, "_"), "[[", 4)
+b$drug1.conc <- as.numeric(sapply(strsplit(b$condition, "_"), "[[", 5))
+drugs <- unique(b$drug1)
+
+b$prop_pos_diff <- b$prop_pos - mean_props[gsub("_30_","_1_",b$cond2)]
+b$prop_pos_ratio <- ifelse(grepl("142708",b$uid), b$prop_pos_diff/veh_mean_prop_range[1], b$prop_pos_diff/veh_mean_prop_range[2])
+
+```
+
+```{r all drugs, fig.height=2, fig.width=3}
+dtp <- subset(b, !grepl("_1_", condition) & drug1 %in% c("a740003","aacba","azd9056","isoPPADS", "bx430", "veh"))
+dtp$drug1 <- factor(dtp$drug1, levels=c("isoPPADS","azd9056","a740003","aacba", "bx430", "veh"))
+mycolors <- viridis::magma(7, direction=-1)[-1]
+
+ggplot(data=dtp, aes(x= factor(drug1), y= 100 * (1 - prop_pos_ratio), fill=factor(drug1))) +
+  # geom_boxplot() +
+  geom_violin() +
+  coord_flip() +
+  scale_fill_manual(values=mycolors) +  # , guide = guide_legend(reverse = TRUE)
+  xlab("") +
+  ylab("% inhib, ATP-induced ppERK+") +
+  theme(legend.position = "none")
+
+# ggsave("~/Desktop/P2Xi_ATP_dose-dependent_ppERK_drug-tol.pdf", width=3, height=2, units="in", device="pdf")
+```
+
+```{r}
+m <- lm(prop_pos_ratio ~ drug1, data=dtp)
+m_anova <- aov(m)
+m_tukey <- TukeyHSD(m_anova)
+m_tukey$drug1[grep("veh",rownames(m_tukey$drug1)),]
+```
+

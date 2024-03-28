@@ -1,0 +1,131 @@
+---
+title: "Calbryte-ppERK correlation--new attempt"
+output: html_notebook
+date: 2024-03-13
+author: Darren Tyson
+---
+# 2024-01-25 data
+Processed by Alan at Molecular Devices
+
+```{r}
+source("traceAnalysisFxns.r")
+```
+
+
+```{r}
+pperk_fn <- '../data/20240125_manualspikedetection/COL14.16_ppERK_XY.csv'
+cb_fn <- "https://www.dropbox.com/scl/fi/0ed1pw00gov0pjbwtbfqm/20240125_COL14.calbryte.csv?rlkey=lwjy4gtf5h7pb6roborf95pn0&dl=1"
+```
+
+```{r}
+pperk <- read.csv(pperk_fn)
+colnames(pperk) <- c("z","time","well","cell_id","total_area","area","intensity_average","intensity_integrated","x","y")
+# remove preceding space from well
+pperk$well <- gsub(" ","",pperk$well)
+
+pperk$reg_id <- paste(pperk$well, pperk$cell_id, sep="_")
+
+# remove COL16 data
+pperk <- pperk[grepl("14_",pperk$reg_id),]
+```
+
+```{r}
+cat(paste0("There are ",nrow(pperk)," unique ROIs in ppERK data\n"))
+```
+
+
+```{r}
+cb <- read.csv(cb_fn)
+cb_colnames <- c("z","time","well","reg_id","area","intensity_mean","centroid_x","centroid_y")
+colnames(cb) <- cb_colnames
+
+cb <- cb[order(cb$well,cb$reg_id,cb$time),]
+rownames(cb) <- NULL
+
+# remove preceding space from well
+cb$well <- gsub(" ","",cb$well)
+wells <- unique(cb$well)
+
+# add im_idx
+cb$im_idx <- rep(1:541)
+
+if(!any(grepl(cb$well[1],cb$reg_id))) cb$reg_id <- paste(cb$well, cb$reg_id, sep="_")
+
+obj_info <- cb[cb$im_idx==1, c("reg_id", "area", "centroid_x", "centroid_y")]
+cb <- cb[,c("reg_id","im_idx","intensity_mean")]
+```
+
+### Restrict ppERK data to ROIs in calbryte data
+```{r}
+cb_rois <- unique(cb$reg_id)
+pperk <- pperk[pperk$reg_id %in% cb_rois,]
+cat(paste0("There are ",nrow(pperk)," unique ROIs in ppERK data after filtering\n"))
+```
+
+### Focus on well K14
+Has few cells with spiking behavior and high variability of ppERK staining (assessed visually)
+
+```{r}
+k14_rois <- cb_rois[grepl("K14",cb_rois)]
+k14_intvals <- cb[grepl("K14",cb$reg_id),]
+```
+
+### Manual visual assessment of spiking from images
+```{r}
+spiking <- list(lo=c(48,69,75,107,239,375,496), 
+                med=c(175,209,240,242,266,267,268,275,284,319,333,342), 
+                hi=c(221,222,288,305))
+spiking_all <- paste0("K14_",unlist(spiking))
+```
+
+```{r}
+k14_pperk <- pperk[grepl("K14",pperk$reg_id),]
+plot(intensity_average ~ area, data=k14_pperk, pch=ifelse(k14_pperk$reg_id %in% spiking_all,"x","."), cex=1.5, 
+     col=ifelse(k14_pperk$reg_id %in% spiking_all, "red","blue"))
+legend("topright", legend=c("no spikes","spiking"), pch=c(".","x"))
+```
+
+
+```{r}
+k14_pperk$calcium_spiking <- ifelse(k14_pperk$reg_id %in% spiking_all, c("no spiking","spiking")[2], c("no spiking","spiking")[1])
+k14_pperk$calcium_spiking <- factor(k14_pperk$calcium_spiking, levels=c("no spiking","spiking"))
+
+conditions <- unique(k14_pperk$calcium_spiking)
+
+set.seed(13)
+
+sample_size <- 20
+n_draws <- 10
+
+samp_no_spikes <- do.call(c, lapply(seq(n_draws), function(i) sample(k14_rois[!k14_rois %in% spiking_all],sample_size, replace=TRUE)))
+samp_spikes <- do.call(c, lapply(seq(n_draws), function(i) sample(k14_rois[k14_rois %in% spiking_all],sample_size, replace=TRUE)))
+
+boot_df <- data.frame(condition=rep(conditions, each=length(samp_no_spikes)),
+                      mean_int=c(k14_pperk[match(samp_no_spikes,k14_pperk$reg_id),]$intensity_average,
+                                 k14_pperk[match(samp_spikes,k14_pperk$reg_id),]$intensity_average))
+```
+
+```{r fig.height=3, fig.width=2.5}
+p <- ggplot(data=boot_df, aes(x=condition, y=mean_int)) + 
+    geom_violin(width=.75, fill = "grey30") + geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    # coord_flip() + 
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size=16, face="bold"),
+          axis.title.y = element_text(size=16, face="bold")) + 
+    ylab("ppERK, avg intensity") + 
+    xlab("")
+p
+# ggsave("~/Desktop/ppERK_nospike_v_spiking.pdf", height=3, width=2.5, units="in")
+```
+
+```{r}
+m <- lm(mean_int ~ condition, data=boot_df)
+summary(m)
+```
+```{r}
+t.test(mean_int ~ condition, data=boot_df)
+```
+
+

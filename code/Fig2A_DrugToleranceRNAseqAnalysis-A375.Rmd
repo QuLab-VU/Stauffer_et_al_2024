@@ -1,0 +1,140 @@
+---
+title: "Drug-tolerant melanoma RNAseq analysis"
+output: html_notebook
+author: Darren Tyson & Philip Stauffer
+date: 2023-08-29
+---
+# Analysis of RNA-seq data
+Four BRAF-mutant melanoma cell lines (A375, SKMEL28, SKMEL5 and WM88) in standard culture medium (naive) or treated with BRAFi (8µM PLX4720) for 8 days (tolerant). Illumina Novaseq paired end reads.
+
+
+```{r Setup, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(EnhancedVolcano)
+library(org.Hs.eg.db)
+library(ggplot2)
+
+OVERWRITE <- FALSE
+OUTPUT_DIR <- file.path("~/P2RX7_ms_output")
+if(!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR)
+```
+
+
+```{r}
+d <- read.csv("../data/STARquantMode_genecounts_all.csv", row.names = 1)
+genes <- rownames(d)
+
+samples <- colnames(d)
+cell_lines <- factor(sapply(strsplit(samples, "_"), "[[", 1))
+conds <- factor(ifelse(sapply(strsplit(samples, "_"), "[[", 2)=="8day","tolerant","naive"))
+reps <- factor(gsub("rep","",sapply(strsplit(samples, "_"), "[[", 3)))
+coldat <- data.frame(cell_line=cell_lines,condition=conds,rep=reps)
+coldat$group <- factor(paste(coldat$cell_line,coldat$condition,sep="_"))
+
+lowgenes <- rownames(d[apply(d,1,function(x) all(x<10)),])
+```
+
+### Make DESeq dataset
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = d,
+                              colData = coldat,
+                              design = ~ cell_line + condition + cell_line:condition)
+
+```
+
+### Reference condition
+Using A375 cells as reference to facilitate comparisons to Gerosa et al., 2020.  
+
+
+Gerosa L, Chidley C, Fröhlich F et al. Receptor-Driven ERK Pulses Reconfigure MAPK Signaling and Enable Persistence of Drug-Adapted BRAF-Mutant Melanoma Cells. Cell Syst. 2020; 11(5) 478-494.e9. doi:10.1016/j.cels.2020.10.002. PubMed PMID: 33113355. PMCID: PMC8009031.
+
+```{r}
+dds$cell_line <- relevel(dds$cell_line, ref = "A375")
+dds$condition <- relevel(dds$condition, ref = "tolerant")
+
+# filter out low-expressed genes
+keep <- rowSums (counts (dds)) >= 10
+dds <- dds [keep, ]
+
+dds <- DESeq(dds)
+```
+### Normalized counts
+```{r}
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+```
+
+
+```{r}
+res_tolerant <- results(dds, contrast=c("condition","tolerant","naive"))
+res_tolerant <- res_tolerant[order(res_tolerant$padj),]
+res_tolerant <- res_tolerant[!is.na(res_tolerant$padj),]
+res_tolerant
+```
+
+### DESeq2 description of contrasts
+https://github.com/tavareshugo/tutorial_DESeq2_contrasts/blob/main/DESeq2_contrasts.md
+https://bioconductor.org/packages/3.7/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#interactions
+
+
+```{r fig.height=5, fig.width=6, warning=FALSE}
+ggp <- EnhancedVolcano(res_tolerant,
+    lab = rownames(res_tolerant),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = "Differential gene expression in drug-tolerant cells",
+    subtitle = bquote(italic(Reference: A375)),
+    pCutoff = 1e-04,
+    pCutoffCol = "padj",
+    xlim=c(-15,15),
+    axisLabSize=9,
+    labSize=1.5, legendLabSize=7, legendIconSize=1, pointSize=1,
+    titleLabSize=12, subtitleLabSize=10, captionLabSize=10,
+    shape = 20,
+    col = c("grey30", "grey60", "orange", "red2"),
+    max.overlaps = 20,
+    borderWidth = 0.6,
+    encircleSize = 1
+    )
+ggp
+```
+### Select genes for annotation
+```{r}
+mylabels <- c("ABCB5","MERTK","NGFR","AXL","EGFR","TYRP1","DCT","EDNRB",
+              "TRPM1","TRPM8","TRPC4","P2RX4","P2RX7","CACNA1C","CACNA1D","PANX2",
+              "SLC24A2","SPRY4","HGF","EREG","MITF", 
+              "ETV5","ETV4","SPRY1")
+```
+
+
+```{r fig.height=4, fig.width=6, warning=FALSE}
+ggp <- EnhancedVolcano(res_tolerant,
+    lab = rownames(res_tolerant),
+    selectLab = mylabels,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 1e-03,
+    pCutoffCol = "padj",
+    xlim=c(-9,13),
+    title = "Differential gene expression in drug-tolerant cells",
+    subtitle = bquote(italic(Reference: A375)),
+    axisLabSize=9,
+    labSize=1.25, legendLabSize=7, legendIconSize=1, pointSize=1,
+    titleLabSize=11, subtitleLabSize=9, captionLabSize=9,
+    shape = 20,
+    col = c("grey30", "grey60", "orange", "red2"),
+    drawConnectors = TRUE,
+    widthConnectors = .5,
+    typeConnectors = "closed",
+    endsConnectors = "last",
+    boxedLabels = TRUE,
+    max.overlaps = 20,
+    borderWidth = 0.5,
+    encircleSize = 0.75
+    )
+ggp
+
+fn <- file.path(OUTPUT_DIR,"Volcano_A375.pdf")
+if(OVERWRITE | !file.exists(fn))
+  ggsave(file=fn, device="pdf", width=6, height=4, units="in")
+```

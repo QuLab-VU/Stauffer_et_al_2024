@@ -1,0 +1,321 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# ATP stim: 20231009_ATPstim_3dayPLX_longstim -- FBS free media in the assay
+First pass visualizing the results of the experiment (details can be found on elab).
+See `~/Melanoma/Ca2Mobilization/20231009_ATPstim_3dayPLX_longstim` directory for thunor .tsv platemap and for barcode information.
+
+pERK staining procedure and imaging details can be found in the elab entry titled 20231009_ATPstim_pERK_3day_60min_PLX
+
+## Data processing details
+MetaExpress multiwavelength cell scoring analysis performed with the settings saved in:
+"VQU_PES_Ca2+ mobilization"
+
+
+
+
+```{r Setup}
+library(diprate)
+library(ggplot2)
+library(viridis)
+library(tidyr)
+library(ggridges)
+library(dplyr)
+```
+
+### Function to quantify ppERK using both proportion of positive cells and the avg intensity
+Using both proportion of cells staining positively for ppERK and the integrated values of the positive cells.  
+
+```{r}
+ppERKint <- function(dat, signif=4) {
+    cell_count <- nrow(dat)
+    pos_cells <- nrow(dat[dat$positive.w2==1,])
+    val <- pos_cells/cell_count*sum(dat[dat$positive.w2==1,]$avg.pERK)
+    val <- signif(val,signif)
+    return(val)
+}
+```
+
+## Load data
+```{r}
+fn <- "https://www.dropbox.com/scl/fi/29bpvy97lhxk30f72tumq/20231009_singlecell_all_ATP.csv?rlkey=hm03jle80pivcvw7hgncy00ml&dl=1"
+d <- read.csv(fn)
+```
+# QC
+Removing cells with total area > 4500 and < 100 $pixels^2$  
+Removing objects with integrated intensity > 5e6 because they tend to be bubbles, precipitated antibody, or debris.
+It was found that setting minimum area to above 200 pixels^2 predominantly filtered out data from the Ca2+ free control group. Because of this bias in filtering, minimum area was set to > 100 pixels. 
+
+### Filtering (QC)
+```{r}
+o_nrow <- nrow(d)
+d <- d[d$total.area < 4500 & d$total.area > 50 & d$w2.stain.integr.intens <5e6,]
+message(cat("Current nrow = ",nrow(d),"\nOriginal nrow = ",o_nrow))
+message(cat("QC removed",signif(100-(nrow(d)/o_nrow*100),2),"% of cells"))
+```
+
+```{r}
+plot(d$w2.stain.integr.intens, d$total.area, pch=20, 
+     col=c("red","orange","yellow")[match(d$BRAFi.tx.time, unique(d$BRAFi.tx.time))])
+legend("topleft",legend=unique(d$BRAFi.tx.time),fill=c("red","orange","yellow"))
+text(4e7,0,paste("# cells =",nrow(d)))
+```
+### `drug2.conc` missing in data
+Had to remove from `keepcols`
+```{r}
+keepcols <- c("cell.line","drug1","drug1.conc","drug2","well",
+              "BRAFi.tx.time","atp.tx.time",
+              "cell.id","total.area","positive.w2","w2.stain.area","w2.stain.integr.intens", "avg.pERK")
+
+d <- d[,keepcols]
+```
+
+
+```{r}
+ab_ctrl_wells <- unique(d[d$drug1=="" & d$drug2=="",]$well)
+untx_ctrl_wells <- unique(d[d$drug2=="control",]$well)
+ctrl_wells <- c(ab_ctrl_wells,untx_ctrl_wells)
+
+d[is.na(d$drug1.conc),"drug1.conc"] <- 0
+d[is.na(d$drug2.conc),"drug2.conc"] <- 0
+
+d[d$drug1=="","drug1"] <- "control"
+
+tx <- tibble(d[!d$well %in% ctrl_wells, ])
+tx <- tx[order(tx$BRAFi.tx.time),]
+
+rownames(tx) <- NULL
+
+ctrls <- d[d$well %in% ctrl_wells, ]
+
+tx$drug1.conc <- signif(tx$drug1.conc, digits= 2)
+tx$drug1 <- factor(tx$drug1)
+```
+
+### Controls 
+* `drug1 == "holiday"`: BRAFi-treated cells given a "holiday"; replaced medium with FBS-free, undrugged media
+* `drug1 == "persistent"`: BRAFi maintained, no agonist added
+* `drug1 == "control"`: Drug-naive cells in FBS free medium (no PLX or ionomycin ever added)
+* `drug1 == "controlFBS"`: Drug-naive cells in FBS-containing medium
+* `drug1 == "" & drug2 == ""`: Antibody controls (1° and 2°) 
+
+```{r}
+ctrlType <- function(drug1)
+    switch(drug1,
+           controlFBS="naive_wFBS",
+           control="naive_woFBS",
+           drug1
+           )
+
+
+d$ctrl_type <- sapply(d$drug1, function(x) 
+    ifelse(x %in% c("","control","controlFBS","holiday","persistent"),ctrlType(x),""))
+
+d[d$drug1=="" & is.na(d$drug2),"ctrl_type"] <- "ab_ctrl"
+d[d$ctrl_type=="","ctrl_type"] <- NA
+d$ctrl_type <- factor(d$ctrl_type)
+unique(d$ctrl_type)
+```
+
+```{r}
+dtp <- d[!is.na(d$ctrl_type),]
+```
+
+```{r message=FALSE, warning=FALSE}
+ggplot(dtp, aes(x = avg.pERK, y = ctrl_type, fill = after_stat(x))) + 
+    xlim(-1,1.5) + 
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+    labs(title = 'Controls', 
+         subtitle="") + 
+    xlab("Mean ppERK/cell (A.U.)") + ylab("Control condition")
+
+```
+
+
+
+```{r}
+tx <- d[is.na(d$ctrl_type),]
+drugs <- unique(tx$drug1)
+```
+
+```{r}
+ppdf <-tx %>%
+    group_by(BRAFi.tx.time, drug1, drug1.conc, atp.tx.time, positive.w2) %>%
+    summarise(num= n()) 
+
+
+ppdf$positive.w2 <- rep(c("negative","positive"), nrow(ppdf)/2)
+
+pct.pos <- ppdf %>%
+    spread(positive.w2, num) %>%
+    mutate(total= negative+positive) %>%
+    summarise(propos= positive/total) %>%
+    ungroup()
+```
+
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="ATP" & tx$BRAFi.tx.time=="3 days",]
+
+
+g <- lapply(unique(dat$drug1.conc), function(dc) {
+    dtp <- dat[dat$drug1.conc==dc,]
+    dtp <- dtp[order(dtp$atp.tx.time),]
+    
+    n_vals <- pct.pos[pct.pos$drug1.conc==dc & pct.pos$BRAFi.tx.time =="3 days",]
+    n_vals$propos <- signif(n_vals$propos*100, 3)
+    
+    ppERK_vals <- sapply(unique(dtp$atp.tx.time), function(tt) ppERKint(dtp[dtp$atp.tx.time==tt,]))
+    names(ppERK_vals) <- unique(dtp$atp.tx.time)
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+    
+    out <- ggplot(dtp, aes(x = avg.pERK, y = factor(atp.tx.time), fill = after_stat(x))) + 
+        xlim(-1,1.75) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = 'Drug-tolerant cells', 
+             subtitle=paste(unique(dtp$drug1),signif(dc*1e6, 2), "µM")) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Time after Tx") + 
+        annotate("text", x=1.25, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+        
+        
+        annotate("text", x=1.25, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==1,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==10,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==20,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==30,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==40,"propos"]), size=2.5) +
+        annotate("text", x=1.25, y=1.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.25, y=2.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.25, y=3.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==20,])), size=2.5) + 
+        annotate("text", x=1.25, y=4.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==30,])), size=2.5) + 
+        annotate("text", x=1.25, y=5.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==40,])), size=2.5) 
+
+    out <- out + theme_ridges()
+    if(dc != 0) out <- out + scale_y_discrete(expand = expand_scale(mult = c(0.15, .75)))
+    out
+})
+
+g
+```
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+g[[7]]
+# ggsave("~/Desktop/0uM_ATP-induced_ppERK_drug-tol.pdf", height=4, width=4, units="in", device="pdf")
+```
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+g[[5]]
+# ggsave("~/Desktop/39uM_ATP-induced_ppERK_drug-tol.pdf", height=4, width=4, units="in", device="pdf")
+```
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="ATP" & tx$BRAFi.tx.time=="60 min",]
+
+g <- lapply(unique(dat$drug1.conc), function(dc) {
+    dtp <- dat[dat$drug1.conc==dc,]
+    dtp <- dtp[order(dtp$atp.tx.time),]
+    
+    n_vals <- pct.pos[pct.pos$drug1.conc==dc & pct.pos$BRAFi.tx.time =="60 min",]
+    n_vals$propos <- signif(n_vals$propos*100, 3)
+    
+    ppERK_vals <- sapply(unique(dtp$atp.tx.time), function(tt) ppERKint(dtp[dtp$atp.tx.time==tt,]))
+    names(ppERK_vals) <- unique(dtp$atp.tx.time)
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+    
+    out <- ggplot(dtp, aes(x = avg.pERK, y = factor(atp.tx.time), fill = after_stat(x))) + 
+        xlim(-1,1.75) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = 'Drug-sensitive cells', 
+             subtitle=paste(unique(dtp$drug1),signif(dc*1e6, 2), "µM")) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Time after Tx") + 
+        annotate("text", x=1.25, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+        
+        
+        annotate("text", x=1.25, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==1,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==10,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==20,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==30,"propos"]), size=2.5) + 
+        
+        annotate("text", x=1.25, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$atp.tx.time==40,"propos"]), size=2.5) +
+        annotate("text", x=1.25, y=1.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.25, y=2.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.25, y=3.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==20,])), size=2.5) + 
+        annotate("text", x=1.25, y=4.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==30,])), size=2.5) + 
+        annotate("text", x=1.25, y=5.5, label= paste("n =",nrow(dtp[dtp$atp.tx.time==40,])), size=2.5) 
+
+    out <- out + theme_ridges()
+    out <- out + scale_y_discrete(expand = expand_scale(mult = c(0.15, .75)))
+    out
+})
+
+g
+```
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+g[[2]]
+# ggsave("~/Desktop/39uM_ATP-induced_ppERK_drug-sens.pdf", height=4, width=4, units="in", device="pdf")
+```
+
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="ATP" & tx$atp.tx.time==20 & tx$BRAFi.tx.time=="3 days",]
+
+ppERK_vals <- sapply(unique(dat$drug1.conc), function(dc) ppERKint(dat[dat$drug1.conc==dc,]))
+names(ppERK_vals) <- unique(signif(dat$drug1.conc*10e6,2))
+ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="0"],2)
+ppERK_vals <- rev(ppERK_vals[order(as.integer(names(ppERK_vals)))])
+
+ggplot(dat, aes(x = avg.pERK, y = factor(signif(drug1.conc*10e6,2)), fill = after_stat(x))) + 
+    xlim(-1,1.5) + 
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+    labs(title = 'Drug-tolerant cells', 
+         subtitle="20 min Tx") + 
+    xlab("Mean ppERK/cell (A.U.)") + ylab("[ATP], µM") + 
+    annotate("text", x=1.25, y=(7:1)+0.5, label=ppERK_vals, size=2.5)
+
+# ggsave("~/Desktop/ATP_dose-dependent_ppERK_drug-tol.pdf", width=4, height=4, units="in", device="pdf")
+```
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dat <- tx[tx$drug1=="ATP" & tx$atp.tx.time==20 & tx$BRAFi.tx.time=="60 min",]
+
+ppERK_vals <- sapply(unique(dat$drug1.conc), function(dc) ppERKint(dat[dat$drug1.conc==dc,]))
+names(ppERK_vals) <- unique(signif(dat$drug1.conc*10e6,2))
+ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="0"],2)
+ppERK_vals <- rev(ppERK_vals[order(as.integer(names(ppERK_vals)))])
+
+ggplot(dat, aes(x = avg.pERK, y = factor(signif(drug1.conc*10e6,2)), fill = after_stat(x))) + 
+    xlim(-1,1.5) + 
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+    labs(title = 'Drug-sensitive cells', 
+         subtitle="20 min Tx") + 
+    xlab("Mean ppERK/cell (A.U.)") + ylab("[ATP], µM") + 
+    annotate("text", x=1.25, y=(7:1)+0.5, label=ppERK_vals, size=2.5)
+
+# ggsave("~/Desktop/ATP_dose-dependent_ppERK_drug-sens.pdf", width=4, height=4, units="in", device="pdf")
+```
+
+
+
+

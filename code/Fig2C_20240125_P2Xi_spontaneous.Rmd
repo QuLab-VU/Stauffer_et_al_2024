@@ -1,0 +1,128 @@
+---
+title: "Effects of P2Xi on spontaneous spiking"
+output: html_notebook
+date: 2024-02-19
+author: "Darren Tyson & Philip Stauffer"
+---
+
+# Data from 20240125
+P2Xi on spontaneous Ca2+ spikes in cells treated with BRAFi for 3 days  
+
+## Identifying individual cells (segmented objects) exhibiting spike patterns in calbryte traces
+Copying code from "Calbryte trace analysis 20240125 97607PS15.Rmd"
+
+### 2024-01-25 data 97607PS15
+```{r}
+source("traceAnalysisFxns.r")
+```
+
+```{r Load preprocessed data}
+intvals <- read.csv("https://www.dropbox.com/scl/fi/nggvx3nph9u68kzwwxfw2/20240125_IXpulsing.P2Xi_ppERK_3dBRAFi_cell_intensities.csv?rlkey=79pr576yc5pn0fbq56h21m83k&dl=1")
+
+wells <- sort(unique(sapply(strsplit(intvals$reg_id, "_"), "[[", 1)))
+
+
+platemap <- read.csv("../data/platemap_20240125_IXpulsing.P2Xi_ppERK_3dBRAFi.tsv", sep="\t")
+
+platemap <- platemap[platemap$well %in% wells,]
+
+int_well_mean_norm <- lapply(wells, function(w) {
+    dff <- intvals[grepl(w,intvals$reg_id),]
+    getMeanInt(dff$intensity_mean, unique(dff$reg_id), unique(dff$im_idx))
+})
+
+intvals$int_well_mean_norm <- do.call(c, int_well_mean_norm)
+
+rois <- unique(intvals$reg_id)
+```
+
+### Number of objects per well
+```{r}
+sapply(wells, function(w) length(unique(intvals[grepl(w,intvals$reg_id),"reg_id"])))
+```
+
+
+### Analysis of manual quantification
+Performed by Philip.  
+
+First-pass analysis will only consider spikes vs no spikes.  
+```{r}
+f <- list.files("../data/20240125_manualspikedetection")
+f <- f[grep("PS.csv", f, fixed=TRUE)]
+
+a <- do.call(rbind, lapply(f, function(x) 
+    read.csv(file.path("../data/20240125_manualspikedetection",x))[,c("reg_id", "spikes", "morethan5", "longspikes", "many_longspikes")]))
+
+rois <- a$reg_id
+a$well <- sapply(strsplit(a$reg_id,"_"), "[[", 1)
+a$cond <- paste(platemap[match(a$well, platemap$well),"drug1"],
+                signif(platemap[match(a$well, platemap$well),"drug1.conc"], 1), sep="_")
+
+# exclude data using drugs >1 µM
+# a <- a[!grepl("e-06",a$cond),]
+
+all_no_spike_ids <- a$reg_id[a$spikes==0]
+
+wells <- unique(a$well)
+conditions <- unique(a$cond)
+conditions <- gsub("_6e-06", ", 6 µM", conditions, fixed=TRUE)
+conditions <- gsub("_4e-07", ", 400 nM", conditions, fixed=TRUE)
+conditions <- gsub("_1e-07", ", 100 nM", conditions, fixed=TRUE)
+conditions <- gsub("_0", ", 0 nM", conditions, fixed=TRUE)
+platemap[platemap$well %in% wells,]
+```
+
+```{r}
+set.seed(13)
+prop_spiking <- do.call(c, lapply(wells, function(w) {
+    n <- 50
+    samp <- lapply(1:100, function(i) sample(rois[grepl(w,rois)], n, replace=TRUE))
+    sapply(samp, function(x) length(which(!x %in% all_no_spike_ids))/n)
+}))
+
+prop_spiking_df <- data.frame(well=rep(wells, each=100), 
+                              condition=rep(conditions, each=100),
+                              prop_spiking=prop_spiking)
+prop_spiking_df$drug <- sapply(strsplit(prop_spiking_df$condition, ","), "[[", 1)
+prop_spiking_df$drug_conc <- sapply(strsplit(prop_spiking_df$condition, ", "), "[[", 2)
+prop_spiking_df$drug_conc <- factor(prop_spiking_df$drug_conc, levels=c("0 nM", "100 nM", "400 nM", "6 µM"))
+```
+
+
+
+```{r fig.height=2, fig.width=4}
+p <- ggplot(data=subset(prop_spiking_df, !grepl("a74",condition)  & !grepl("aa",condition)), aes(x=drug_conc, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + 
+    geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    coord_flip() +
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size=16, face="bold"),
+          axis.title.y = element_text(size=16, face="bold")) + 
+    # ylim(c(0,0.75)) +
+    ylab("Proportion spiking") + 
+    xlab("")
+p + facet_wrap(vars(drug))
+
+
+# ggsave("~/Desktop/P2Xi_spiking.pdf", width=4, height=2, units="in")
+```
+
+### Calculate percent inhibition of AZD
+```{r}
+b <- subset(prop_spiking_df, !grepl("a74",condition)  & !grepl("aa",condition))
+z <- b[b$drug=="azd9056",]
+z <- z[z$drug_conc %in% c("0 nM", "100 nM"),]
+mean_vals <- aggregate(prop_spiking ~ drug_conc, data=z, FUN=mean)
+azd_pct_inhib <- 1 - mean_vals[mean_vals$drug_conc=="100 nM","prop_spiking"] / mean_vals[mean_vals$drug_conc=="0 nM","prop_spiking"]
+azd_pct_inhib
+```
+### Calculate percent inhibition of isoPPADS
+```{r}
+y <- b[b$drug=="isoPPADS",]
+y <- y[y$drug_conc %in% c("0 nM", "6 µM"),]
+mean_vals <- aggregate(prop_spiking ~ drug_conc, data=y, FUN=mean)
+ppads_pct_inhib <- 1 - mean_vals[mean_vals$drug_conc=="6 µM","prop_spiking"] / mean_vals[mean_vals$drug_conc=="0 nM","prop_spiking"]
+ppads_pct_inhib
+```

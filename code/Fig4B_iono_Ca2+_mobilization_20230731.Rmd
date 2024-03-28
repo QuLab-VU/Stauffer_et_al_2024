@@ -1,0 +1,195 @@
+---
+title: "Calcium activation of pERK"
+output: html_notebook
+author: Darren Tyson and Philip Stauffer
+date: August 10, 2023
+---
+
+# Simplifying code 
+Based on code in `./Ca2Mobilization/20230731_ionomycinCa2+mobilization/20230731_analysis_PES_v02.Rmd`
+
+### Updated code
+2024-03-14
+```{r Setup}
+library(diprate)
+library(ggplot2)
+library(viridis)
+library(tidyr)
+library(forcats)
+library(dplyr)
+```
+## Global variables
+```{r}
+SAVEPLOTS <- FALSE
+```
+
+
+## Copied data to Dropbox
+```{r}
+dat_filepath <- "https://www.dropbox.com/scl/fi/4mu4fkqlokce1i9lxsa5i/20230731_singlecell_all_iono.csv?rlkey=0bsu7q9e9aep45fhsyuv5zogw&dl=1"
+d <- read.csv(dat_filepath)
+```
+
+### Perform some QC
+```{r}
+d <- d[d$total.area < 4500 & d$total.area > 100 & d$w2.stain.integr.intens <5e6,]
+```
+
+### Add new column: `avg.pERK`
+```{r}
+d$avg.pERK <- log(d$w2.stain.integr.intens/d$w2.stain.area)
+d$avg.pERK <- d$avg.pERK - min(d$avg.pERK, na.rm=TRUE) # subtract lowest pERK level
+d$avg.pERK[is.na(d$avg.pERK)] <- -0.5 # replace missing values with -0.5
+```
+
+### Add Ionomycin treatment times
+```{r}
+d$iono.tx.time <- as.integer(d$drug2)
+d$iono.tx.time[is.na(d$iono.tx.time)] <- 0
+```
+
+### Annotation
+Controls: 
+'drug1 == "control"' Drug naive cells in FBS containing media to compare the effects between FBS and no FBS in the media
+`drug1 == "" & drug2 == ""` are for (1° and 2°) antibody controls
+
+Separate controls and ionomycin-treated
+```{r}
+d$drug2[is.na(d$drug2)] <- ""
+ab_ctrl <- d[d$drug1=="" & d$drug2=="", ]
+persistent <- d[d$drug1== "persistent", ] #undrugged media was added to these wells; PLX4720 concentration was approximately 4 uM, down from 8 uM, for 20 minutes before fixation.
+nFBS <- d[d$drug1=="control", ] #naive & FBS
+
+ctrl_wells <- c(unique(ab_ctrl$well), unique(persistent$well), unique(nFBS$well))
+
+tx <- d[!d$well %in% ctrl_wells, ]
+tx$drug1.conc <- factor(signif(tx$drug1.conc, digits= 2))
+tx$iono.tx.time <- factor(tx$iono.tx.time)
+
+ctrls <- d[d$well %in% ctrl_wells, ]
+ctrls <- ctrls[!ctrls$well %in% unique(ab_ctrl$well), ]
+
+#generating individual groups
+day3 <- tx[tx$BRAFi.tx.time == "3 days", ]
+
+min60 <- tx[tx$BRAFi.tx.time== "60 min",]
+```
+
+### Exclude control wells with technical problems
+Philip's note: outlier wells may include C01, C02, D01, D02 F01, G01, H01
+```{r}
+day3_grouped <- day3[!day3$well %in% c("C01", "C02", "D01", "D02", "F01", "G01", "H01", "H02"),] %>%
+    group_by(drug1, iono.tx.time, drug1.conc, positive.w2) %>%
+    summarise(num=n()) 
+
+day3_grouped$positive.w2 <- rep(c("negative","positive"), nrow(day3_grouped)/2)
+
+
+pct.pos <- day3_grouped %>%
+    spread(positive.w2, num) %>%
+    mutate(total= negative+positive) %>%
+    summarise(propos= positive/total) %>%
+    ungroup()
+```
+
+
+
+## BRAFi-sensitive cells
+```{r}
+temp <-min60 %>%
+    group_by(drug1, iono.tx.time, drug1.conc, positive.w2) %>%
+    summarise(num= n()) 
+    
+temp$positive.w2 <- rep(c("negative","positive"), 30)
+temp$drug1.conc[is.na(temp$drug1.conc)] <- 0
+
+sens.pct.pos <- temp %>%
+    spread(positive.w2, num) %>%
+    mutate(total= negative+positive) %>%
+    summarise(propos= positive/total) %>%
+    ungroup()
+```
+
+
+```{r}
+dat <- pct.pos
+dat$iono.tx.time <- as.integer(as.character(dat$iono.tx.time))
+drug_concs <- unique(dat$drug1.conc)
+mycols <- rev(viridis(n=length(drug_concs)))
+
+dat2 <- sens.pct.pos
+dat2$iono.tx.time <- as.integer(as.character(dat2$iono.tx.time))
+
+
+```
+
+```{r fig.height=4, fig.width=6}
+if(SAVEPLOTS) pdf(file="~/Desktop/iono-induced_ppERK_proportion.pdf", width=6, height=4)
+par(mfrow=c(1,2), mar=c(2,1,1.5,0), oma=c(1,2,1,1))
+plot(propos ~ as.integer(as.character(iono.tx.time)), data=dat2, type="n", 
+     ylim=c(0,0.5), xlab=NA, ylab=NA,
+     main="Drug-sensitive cells", lwd=2)
+for(dc in drug_concs)
+    lines(propos ~ iono.tx.time, data=dat2[dat2$drug1.conc==dc,], col=mycols[match(dc,drug_concs)], lwd=2)
+legend("topleft", legend=paste(as.numeric(as.character(drug_concs))*1e6, "µM"), col=mycols, lwd=2, cex=0.75)
+mtext("Proportion of pERK-positive cells", side=2, line=2)
+
+plot(propos ~ as.integer(as.character(iono.tx.time)), data=dat, type="n", 
+     ylim=c(0,0.5), xlab=NA, ylab=NA, yaxt='n',
+     main="Drug-tolerant cells", lwd=2)
+for(dc in drug_concs)
+    lines(propos ~ iono.tx.time, data=dat[dat$drug1.conc==dc,], col=mycols[match(dc,drug_concs)], lwd=2)
+
+mtext("Ionomycin treatment time (min)", side=1, line=0, outer=TRUE)
+
+```
+
+
+### Per well integrations 
+To demonstrate that pERK activation is to a greater magnitude in 3 day vs 60 min treated cells, in addition to a greater proportion of positive cells
+
+Strategy: sum integrals of all cells in each individual condition (group by concentrations and time points)
+Will need to normalize the summed intensity of pERK staining within each condition group to the number of cells contained in the respective group (nrow for each condition) 
+```{r}
+d3int <- day3 %>%
+    group_by(drug1.conc, iono.tx.time) %>%
+    summarise(intsum= sum(w2.stain.integr.intens)/n()) %>%
+    ungroup()
+
+d60mint <- min60 %>%
+     group_by(drug1.conc, iono.tx.time) %>%
+    summarise(intsum= sum(w2.stain.integr.intens)/n()) %>%
+    ungroup()
+
+
+d3int$iono.tx.time <- as.integer(as.character(d3int$iono.tx.time))
+drug_concs <- unique(d3int$drug1.conc)
+
+d60mint$iono.tx.time <- as.integer(as.character(d60mint$iono.tx.time))
+
+
+```
+
+```{r fig.height=4, fig.width=6}
+if(SAVEPLOTS) pdf(file="~/Desktop/iono-induced_ppERK_intensity.pdf", width=6, height=4)
+
+par(mfrow=c(1,2), mar=c(2,1,1.5,0), oma=c(1,2,1,1))
+plot(intsum/1e5 ~ as.integer(as.character(iono.tx.time)), data=d60mint, type="n", 
+     ylim=c(0,5),
+     xlab=NA, ylab=NA,
+     main="Drug-sensitive cells", lwd=2)
+for(dc in drug_concs)
+    lines(intsum/1e5 ~ iono.tx.time, data=d60mint[d60mint$drug1.conc==dc,], col=mycols[match(dc,drug_concs)], lwd=2)
+legend("topleft", legend=paste(as.numeric(as.character(drug_concs))*1e6, "µM"), col=mycols, lwd=2, cex=0.75)
+mtext("pERK staining/cell, X 1e5", side=2, line=2)
+
+plot(intsum/1e5 ~ as.integer(as.character(iono.tx.time)), data=d3int, type="n",
+     ylim=c(0,5),
+     xlab=NA, ylab=NA, yaxt='n',
+     main="Drug-tolerant cells", lwd=2)
+for(dc in drug_concs)
+    lines(intsum/1e5 ~ iono.tx.time, data=d3int[d3int$drug1.conc==dc,], col=mycols[match(dc,drug_concs)], lwd=2)
+
+mtext("Ionomycin treatment time (min)", side=1, line=0, outer=TRUE)
+```
+

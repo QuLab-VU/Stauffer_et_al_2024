@@ -1,0 +1,213 @@
+---
+title: "Calcium activation of pERK"
+output: html_notebook
+author: Darren Tyson and Philip Stauffer
+date: August 10, 2023
+---
+
+# Simplifying code 
+Based on code in `./Ca2Mobilization/20230731_ionomycinCa2+mobilization/20230731_analysis_PES_v02.Rmd`
+
+```{r Setup, message=FALSE, warning=FALSE}
+library(diprate)
+library(ggplot2)
+library(viridis)
+library(tidyr)
+library(forcats)
+library(dplyr)
+
+SAVEPLOTS <- FALSE
+```
+
+### Function to quantify ppERK using both proportion of positive cells and the avg intensity
+Using both proportion of cells staining positively for ppERK and the integrated values of the positive cells.  
+
+```{r}
+ppERKint <- function(dat, signif=4) {
+    cell_count <- nrow(dat)
+    pos_cells <- nrow(dat[dat$positive.w2==1,])
+    val <- pos_cells/cell_count*sum(dat[dat$positive.w2==1,]$avg.pERK)
+    val <- signif(val,signif)
+    return(val)
+}
+```
+
+
+## Data on DropBox
+```{r}
+dat_filepath <- "https://www.dropbox.com/scl/fi/y6d16tdkbgq77llv644aj/20230731_singlecell_all_iono.csv?rlkey=mfc5bm8xedpysoixilfuqrut5&dl=1"
+d <- read.csv(dat_filepath)
+```
+
+### Perform some QC
+```{r}
+d <- d[d$total.area < 4500 & d$total.area > 100 & d$w2.stain.integr.intens <5e6,]
+```
+
+### Add new column: `avg.pERK`
+```{r}
+d$avg.pERK <- log(d$w2.stain.integr.intens/d$w2.stain.area)
+d$avg.pERK <- d$avg.pERK - min(d$avg.pERK, na.rm=TRUE) # subtract lowest pERK level
+d$avg.pERK[is.na(d$avg.pERK)] <- -0.5 # replace missing values with -0.5
+```
+
+### Add Ionomycin treatment times
+```{r}
+d$iono.tx.time <- as.integer(d$drug2)
+d$iono.tx.time[is.na(d$iono.tx.time)] <- 0
+```
+
+
+### Filtering steps previously applied to second data set
+2023-08-15 data have already been processed with the filtering steps above; data will be combined into single file
+```{r}
+d$expt.date <- ifelse(grepl("142319",d$plate.id),"20230729","20230815")
+```
+
+
+### Annotation
+Controls: 
+'drug1 == "control"' Drug naive cells in FBS containing media to compare the effects between FBS and no FBS in the media
+`drug1 == "" & drug2 == ""` are for (1° and 2°) antibody controls
+
+Separate controls and ionomycin-treated
+```{r}
+d$drug2[is.na(d$drug2)] <- ""
+ab_ctrl <- d[d$drug1=="" & d$drug2=="", ]
+
+# undrugged media was added to these wells; PLX4720 concentration was approximately 4 uM, down from 8 uM, for 20 minutes before fixation.
+persistent <- d[d$drug1== "persistent", ] 
+
+nFBS <- d[d$drug1=="control", ] # naive & FBS
+
+ctrl_wells <- c(unique(ab_ctrl$well), unique(persistent$well), unique(nFBS$well))
+
+tx <- d[!d$well %in% ctrl_wells, ]
+tx$drug1.conc <- factor(signif(tx$drug1.conc, digits= 2))
+tx$iono.tx.time <- factor(tx$iono.tx.time)
+
+ctrls <- d[d$well %in% ctrl_wells, ]
+ctrls <- ctrls[!ctrls$well %in% unique(ab_ctrl$well), ]
+```
+
+### Exclude some control wells
+Philip's note: outlier wells may include C01, C02, D01, D02 F01, G01, H01
+```{r}
+# remove wells from 20230729 data
+bad_wells_729 <- c("C01", "C02", "D01", "D02", "F01", "G01", "H01", "H02")
+
+tx <- tx[!(tx$well %in% bad_wells_729 & tx$expt.date=="20230729"),]
+
+#generating individual groups
+day3 <- tx[tx$BRAFi.tx.time == "3 days", ]
+
+min60 <- tx[tx$BRAFi.tx.time== "60 min",]
+
+day3_grouped <- day3[!(day3$well %in% bad_wells_729 & day3$expt.date=="20230729"),] %>%
+    group_by(expt.date, drug1, iono.tx.time, drug1.conc, positive.w2) %>%
+    summarise(num=n()) 
+
+day3_grouped$positive.w2 <- c("negative","positive")[match(day3_grouped$positive.w2,c(0,1))]
+
+pct.pos <- day3_grouped %>%
+    spread(positive.w2, num) %>%
+    mutate(total= negative+positive) %>%
+    summarise(propos= positive/total) %>% 
+    ungroup()
+
+pct.pos$total <- as.vector(day3_grouped[day3_grouped$positive.w2=="negative",]$num) + 
+    as.vector(day3_grouped[day3_grouped$positive.w2=="positive",]$num)
+```
+
+
+### Plot the full distribution of ppERK cell staining for each condition
+  
+  
+```{r}
+library(ggridges)
+
+dat <- tibble(tx[tx$expt.date=="20230729",c("well","positive.w2","BRAFi.tx.time","drug1.conc","iono.tx.time","avg.pERK")])
+dat <- dat[!dat$well %in% bad_wells_729,]
+dat$condition <- paste(dat$BRAFi.tx.time, dat$drug1.conc, sep="_")
+dat <- dat[order(dat$BRAFi.tx.time,dat$drug1.conc),]
+rownames(dat) <- NULL
+
+drug_conc <- sort(unique(dat$drug1.conc))
+
+
+plotRidges <- function(tib, dc, tit="Drug-tolerant cells") {
+    tx.times <- unique(tib$iono.tx.time)
+    n_vals <- do.call(rbind, lapply(tx.times, function(tt) data.frame(
+                                        tx.time=tt,
+                                        pos=length(which(tib[tib$iono.tx.time==tt,]$positive.w2==1)),
+                                        total=nrow(tib[tib$iono.tx.time==tt,]))
+                                    )
+                      )
+    n_vals$propos <- signif(n_vals$pos/n_vals$total*100, 3)
+    
+    ppERK_vals <- sapply(sort(unique(tib$iono.tx.time)), function(tt) ppERKint(tib[tib$iono.tx.time==tt,]))
+    names(ppERK_vals) <- sort(unique(tib$iono.tx.time))
+    ppERK_vals <- round(ppERK_vals/ppERK_vals[names(ppERK_vals)=="1"],2)
+
+    g <- ggplot(tib, aes(x = avg.pERK, y = iono.tx.time, fill = after_stat(x))) + 
+        xlim(-1,1.5) + 
+        geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+        scale_fill_viridis_c(name = "avg ppERK", option = "C") +
+        labs(title = tit, 
+             subtitle=paste(dc,"M ionomycin")) + 
+        xlab("Mean ppERK/cell (A.U.)") + ylab("Ionomycin Tx time (min)") + 
+        annotate("text", x=1.25, y=1:(length(ppERK_vals))+0.25, label=ppERK_vals, size=2.5) +
+
+        annotate("text", x=1.3, y=1.5, label= paste("n =",nrow(tib[tib$iono.tx.time==1,])), size=2.5) + 
+        annotate("text", x=1.3, y=2.5, label= paste("n =",nrow(tib[tib$iono.tx.time==5,])), size=2.5) + 
+        annotate("text", x=1.3, y=3.5, label= paste("n =",nrow(tib[tib$iono.tx.time==10,])), size=2.5) + 
+        annotate("text", x=1.3, y=4.5, label= paste("n =",nrow(tib[tib$iono.tx.time==15,])), size=2.5) + 
+        annotate("text", x=1.3, y=5.5, label= paste("n =",nrow(tib[tib$iono.tx.time==20,])), size=2.5) + 
+        
+        annotate("text", x=1.2, y=1.75, label= 
+                     paste("%pos =",n_vals[n_vals$tx.time==1,]$propos), size=2.5) + 
+        annotate("text", x=1.2, y=2.75, label= 
+                     paste("%pos =",n_vals[n_vals$tx.time==5,]$propos), size=2.5) + 
+        annotate("text", x=1.2, y=3.75, label= 
+                     paste("%pos =",n_vals[n_vals$tx.time==10,]$propos), size=2.5) + 
+        annotate("text", x=1.2, y=4.75, label= 
+                     paste("%pos =",n_vals[n_vals$tx.time==15,]$propos), size=2.5) + 
+        annotate("text", x=1.2, y=5.75, label= 
+                     paste("%pos =",n_vals[n_vals$tx.time==20,]$propos), size=2.5)
+    
+    g <- g + theme_ridges()
+    g <- g + scale_y_discrete(expand = expand_scale(mult = c(0.15, .75)))
+
+    return(g)
+}
+
+```
+
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dc <- 2.5e-6
+dtp <- dat[dat$drug1.conc==dc & dat$BRAFi.tx.time=="3 days",c("well","positive.w2","iono.tx.time","avg.pERK")]
+dtp <- tibble(dtp)
+plotRidges(dtp,dc)
+# ggsave("~/Desktop/tol_2.5uMiono_time_ppERK.pdf", width=4, height=4, units="in")
+```
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dc <- 2.5e-6
+dtp <- dat[dat$drug1.conc==dc & dat$BRAFi.tx.time=="60 min",c("well","positive.w2","iono.tx.time","avg.pERK")]
+dtp <- tibble(dtp)
+plotRidges(dtp,dc,tit="Drug-sensitive cells")
+# ggsave("~/Desktop/sens_2.5uMiono_time_ppERK.pdf", width=4, height=4, units="in")
+```
+
+
+```{r fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+dc <- 0
+dtp <- dat[dat$drug1.conc==dc & dat$BRAFi.tx.time=="3 days",c("well","positive.w2","iono.tx.time","avg.pERK")]
+dtp <- tibble(dtp)
+plotRidges(dtp,dc)
+# ggsave("~/Desktop/tol_0uMiono_time_ppERK.pdf", width=4, height=4, units="in")
+```
+
+
+

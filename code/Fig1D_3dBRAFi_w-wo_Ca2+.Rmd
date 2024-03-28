@@ -1,0 +1,96 @@
+---
+title: "Role of eCa2+ on spontaneous spiking"
+output: html_notebook
+date: 2024-02-21
+author: "Darren Tyson & Philip Stauffer"
+---
+
+# Effects of extracellular calcium on spontaneous spiking
+BRAFi 3 days -/+ eCa2+
+
+## Identifying individual cells (segmented objects) exhibiting spike patterns in calbryte traces
+Copying code from "20240125_manual_spike_analysis.Rmd" and "Calbryte trace analysis 20240111 97603PS11.Rmd" 
+
+### 2024-01-11 data 97603PS11
+```{r}
+source("traceAnalysisFxns.r")
+```
+
+```{r Load preprocessed data}
+intvals <- read.csv("https://www.dropbox.com/scl/fi/6h8huz1smpkurwwdrltl2/97603PS11_cell_intensities.csv?rlkey=dwctjs4eqrn4n95gr2wt8mg7z&dl=1")
+
+wells <- unique(sapply(strsplit(intvals$reg_id, "_"), "[[", 1))
+
+platemap <- read.csv("../data/platemap_20240111_p2xi.spontaneousCa2+.tsv", sep="\t")
+platemap <- platemap[platemap$cell.line!="",]
+```
+
+### Exclude first 61 time points due to focus artifact
+```{r}
+intvals <- subset(intvals, im_idx > 60)
+```
+
+
+### Normalize per each well
+```{r}
+int_well_mean_norm <- lapply(wells, function(w) {
+    dff <- intvals[grepl(w,intvals$reg_id),]
+    getMeanInt(dff$intensity_mean, unique(dff$reg_id), unique(dff$im_idx))
+})
+
+intvals$int_well_mean_norm <- do.call(c, int_well_mean_norm)
+```
+
+
+Sample 100 reg_ids from each well
+```{r}
+set.seed(2)
+sample_ids <- lapply(wells, function(w) {
+    uid <- unique(intvals[grepl(w,intvals$reg_id),"reg_id"])
+    sample(uid, size=100)
+})
+names(sample_ids) <- wells
+```
+
+
+
+### Analysis of manual quantification
+Performed by Philip
+```{r}
+a <- read.csv("../data/20240111_manual_spike_dtxn.csv")
+rois <- a$reg_id
+wells <- unique(sapply(strsplit(a$reg_id, "_"), "[[", 1))
+conditions <- c(rep("no Ca2+",4), rep("Ca2+",3), "FBS")
+all_no_spike_ids <- a$reg_id[a$spikes==0]
+platemap[platemap$well %in% wells,]
+```
+
+```{r}
+prop_spiking <- do.call(c, lapply(wells, function(w) {
+    n <- 50
+    samp <- lapply(1:100, function(i) sample(rois[grepl(w,rois)], n))
+    sapply(samp, function(x) length(which(!x %in% all_no_spike_ids))/n)
+}))
+prop_spiking_df <- data.frame(condition=rep(conditions, each=100), 
+                              prop_spiking=prop_spiking)
+
+```
+
+```{r fig.height=2.5, fig.width=2}
+p <- ggplot(data=prop_spiking_df[!grepl("FBS",prop_spiking_df$condition),], aes(x=condition, y=prop_spiking, fill=1)) + 
+    geom_violin(width=.75) + 
+    geom_boxplot(width=0.1, color="grey", alpha=0.5) + 
+    # coord_flip() + 
+    theme(legend.position="none", 
+          axis.text.x = element_text(size=12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size=16, face="bold"),
+          axis.title.y = element_text(size=16, face="bold")) + 
+    # ylim(c(0,0.75)) +
+    ylab("Proportion spiking") + 
+    xlab("BRAFi, 3d")
+p
+
+#ggsave("~/Desktop/TolerantCells_w-wo_ExCa2+.png", width=2, height=2.5, units="in", device="png")
+```
+
