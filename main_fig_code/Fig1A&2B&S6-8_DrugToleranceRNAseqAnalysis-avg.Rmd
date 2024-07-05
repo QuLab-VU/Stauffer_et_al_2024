@@ -125,7 +125,7 @@ mylabels <- c("ABCB5","MERTK","NGFR","AXL","EGFR","TYRP1","DCT","EDNRB","PPARGC1
 
 
 ### Supplementary Figure S7
-```{r fig.height=4, fig.width=6, warning=FALSE}
+```{r fig.height=5, fig.width=5, warning=FALSE}
 ggp <- EnhancedVolcano(res_tolerant,
     lab = rownames(res_tolerant),
     selectLab = mylabels,
@@ -363,7 +363,34 @@ p <- list(plot_naive_v_tol("CACNA1C",yl=c(-2,8)),
           plot_naive_v_tol("P2RX7", yl=c(2,16)),
           plot_naive_v_tol("ITPR2",yl=c(8,13)),
           plot_naive_v_tol("CALB2", yl=c(-2,12)),
-          plot_naive_v_tol("ATP2B2", yl=c(-2,8)))
+          plot_naive_v_tol("ATP2B2", yl=c(-2,8)),
+          plot_naive_v_tol("NGFR", yl=c(-2,18)))
 p
+```
+
+### Melanoblast genes
+
+Thomas, A. J. & Erickson, C. A. The making of a melanocyte: the specification of melanoblasts from the neural crest. Pigment Cell Melanoma Res 21, 598–610 (2008).  
+
+NOTE: all are high for SOX10, PAX3 and MITF 
+
+```{r fig.height=3, fig.width=1.5}
+# neural_crest_genes <- c('NGFR', 'AQP1', 'GFRA2', 'L1CAM', 'SLITRK6', 'RXRG','SOX10')
+melanoblast_genes <- c('SOX10','MITF','PAX3','FOXD3','KIT','DCT','EDNRB','TYRP1')
+
+p <- lapply(melanoblast_genes, function(x) plot_naive_v_tol(x, yl=c(-4,20)))
+p
+```
+### MAP3K-related genes
+Also including scaffold proteins and RAF and RAS isoforms.  
+
+```{r fig.height=3, fig.width=1.5}
+map3k_genes <- rownames(dds)[grep('MAP3K',rownames(dds))]
+map3k_genes <- map3k_genes[!grepl("-",map3k_genes)]
+map3k_genes <- c(map3k_genes,c('ARAF','BRAF','RAF1','RIT1','RIT2','SHOC2','KRAS','NRAS','HRAS'))
+
+p <- lapply(map3k_genes, function(x) plot_naive_v_tol(x, yl=c(-4,20)))
+p
+
 ```
 
