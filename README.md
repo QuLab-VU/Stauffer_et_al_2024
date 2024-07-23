@@ -11,3 +11,6 @@ The treatment of BRAF-mutant melanoma with BRAF inhibitors is severely limited i
 Stauffer PE, Brinkley J, Jacobson DA, Quaranta V, Tyson DR. _Purinergic Ca<sup>2+</sup> Signaling as a Novel Mechanism of Drug Tolerance in BRAF-Mutant Melanoma._ Cancers (Basel). 2024; 16(13) 2426. doi:10.3390/cancers16132426. PubMed PMID: 39001489. PMCID: PMC11240618.  
 
 [Download the paper here](https://doi.org/10.3390/cancers16132426)
+
+### Summary of code
+Code is primarily written in R Markdown (**.Rmd**) using [RStudio](https://posit.co/products/open-source/rstudio/) and rendered into HTML so output can be directly visualized using a browser. The HTML files cannot be directly visualized within GitHub and must be downloaded either individually as source files or as part of the entire repository and opened on your local computer.  
